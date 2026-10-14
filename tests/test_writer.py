@@ -312,3 +312,22 @@ def test_cli_writes_output_even_with_unplaced(make_xlsx: MakeXlsx, tmp_path: Pat
     assert main([str(path), "--stock", "12", "-o", str(out)]) == EXIT_UNPLACED
     workbook = openpyxl.load_workbook(out)
     assert rows(workbook[th.SHEET_NAMES["unplaced"]])[0][:2] == ("DB12", "1")
+
+
+def test_bar_counts_sheet_lists_each_size_and_length(
+    template_output: tuple[CuttingPlan, openpyxl.Workbook],
+) -> None:
+    plan, workbook = template_output
+    lines = [r[0] for r in rows(workbook[th.SHEET_NAMES["bar_counts"]])]
+    expected = [
+        f"Size {sp.size} จำนวน {n} เส้น เหล็ก {th.format_metres_short(stock)} เมตร"
+        for sp in plan.sizes
+        for stock, n in sorted(
+            (
+                g.bar.stock_length_mm,
+                sum(h.count for h in sp.groups if h.bar.stock_length_mm == g.bar.stock_length_mm),
+            )
+            for g in sp.groups
+        )
+    ]
+    assert lines == list(dict.fromkeys(expected))

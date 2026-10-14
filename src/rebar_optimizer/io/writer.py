@@ -35,7 +35,13 @@ from rebar_optimizer.domain.models import (
 from rebar_optimizer.domain.weights import unit_weight_kg_per_m
 from rebar_optimizer.i18n import th
 from rebar_optimizer.io.reader import InputTable
-from rebar_optimizer.services.summary import SizeSummary, bar_detail, cut_runs, summarize_size
+from rebar_optimizer.services.summary import (
+    SizeSummary,
+    bar_counts,
+    bar_detail,
+    cut_runs,
+    summarize_size,
+)
 
 METRE_FORMAT = "0.000"
 KG_FORMAT = "0.0"
@@ -86,6 +92,7 @@ def build_workbook(
     _plan_sheet(workbook, plan)
     _details_sheet(workbook, plan)
     _summary_sheet(workbook, plan, summaries, weights)
+    _bar_counts_sheet(workbook, plan)
     _purchase_sheet(workbook, summaries, weights)
     _inventory_sheet(workbook, plan, source.inventory, weights)
     _remnants_sheet(workbook, plan)
@@ -218,6 +225,15 @@ def _summary_sheet(
     sheet = _table_sheet(workbook, "summary", rows, formats)
     if rows:
         _bold_row(sheet, len(rows) + 1)
+
+
+def _bar_counts_sheet(workbook: openpyxl.Workbook, plan: CuttingPlan) -> None:
+    """One sentence per size and stock length, the same lines as the CLI and GUI."""
+    rows: list[Row] = [
+        (th.format_bar_count(c.size, c.count, c.stock_length_mm, c.inventory),)
+        for c in bar_counts(plan)
+    ]
+    _table_sheet(workbook, "bar_counts", rows, {}, autofilter=False)
 
 
 def _purchase_sheet(

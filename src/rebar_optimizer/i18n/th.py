@@ -188,6 +188,7 @@ SHEET_NAMES: dict[str, str] = {
     "plan": "แผนการตัด",
     "details": "รายละเอียดการตัด",
     "summary": "สรุปต่อ Size",
+    "bar_counts": "สรุปจำนวนเส้น",
     "purchase": "รายการสั่งซื้อ",
     "inventory": "ใช้จากคงคลัง",
     "remnants": "เศษคงเหลือ",
@@ -196,6 +197,8 @@ SHEET_NAMES: dict[str, str] = {
     "status": "ตั้งค่าและสถานะ",
     "input": "ข้อมูล Input",
 }
+
+BAR_COUNT_TITLE_SHEET = "สรุปจำนวนเส้นแยกตาม Size และความยาว"
 
 HEADERS: dict[str, tuple[str, ...]] = {
     "plan": (
@@ -242,6 +245,7 @@ HEADERS: dict[str, tuple[str, ...]] = {
         "lower bound (m)",
         "gap %",
     ),
+    "bar_counts": (BAR_COUNT_TITLE_SHEET,),
     "purchase": ("Size", "ความยาว stock (m)", "จำนวนเส้น", "ความยาวรวม (m)", "น้ำหนัก (kg)"),
     "inventory": (
         "Size",
@@ -284,7 +288,7 @@ SUBTOTAL_TEXT = "รวม {size}"
 
 BAR_COUNT_LINE = "Size {size} จำนวน {count} เส้น เหล็ก {stock_m} เมตร"
 """One line of the per-size, per-length bar summary (CLI and GUI)."""
-BAR_COUNT_TITLE = "สรุปจำนวนเส้นแยกตาม Size และความยาว"
+BAR_COUNT_TITLE = BAR_COUNT_TITLE_SHEET
 
 STOCK_SOURCE_LABELS: dict[str, str] = {
     "new": "ซื้อใหม่",
