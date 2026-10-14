@@ -9,6 +9,7 @@ description = "Rebar cutting stock optimizer (1D cutting stock, multiple stock l
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "numpy==2.5.4",
     "openpyxl==3.1.5",
     "ortools==9.15.6755",
     "PySide6-Essentials==6.12.0",
@@ -40,6 +41,10 @@ rebar_optimizer = ["ui/resources/*.svg"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+filterwarnings = [
+    # OR-Tools' SWIG wrapper (pywraplp) on Python 3.12+; not our code.
+    "ignore:builtin type swig:DeprecationWarning",
+]
 markers = [
     "gui: tests that need Qt (run offscreen)",
     "slow: longer-running solver tests",
