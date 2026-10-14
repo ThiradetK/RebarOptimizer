@@ -22,16 +22,17 @@ from rebar_optimizer.domain.errors import (
     OutputWriteError,
     SettingsError,
 )
-from rebar_optimizer.domain.models import Cut, CuttingPlan, Piece
+from rebar_optimizer.domain.models import CuttingPlan, Piece
 from rebar_optimizer.domain.settings import OptimizerSettings, StockMode, parse_stock_lengths_m
 from rebar_optimizer.i18n import th
 from rebar_optimizer.i18n.th import CLI_TEXT, format_metres
 from rebar_optimizer.io.reader import read_pieces
 from rebar_optimizer.io.template import write_template
+from rebar_optimizer.io.writer import WriteSource, write_plan
 from rebar_optimizer.logging_config import setup_logging
 from rebar_optimizer.services import planner
 from rebar_optimizer.services.cancel import ProgressEvent, ProgressKind
-from rebar_optimizer.services.summary import bar_detail, summarize_size
+from rebar_optimizer.services.summary import bar_detail, cut_runs, summarize_size
 
 EXIT_OK = 0
 EXIT_INPUT = 1
@@ -51,6 +52,7 @@ class _Parser(argparse.ArgumentParser):
 def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="rebar_optimizer", description=CLI_TEXT["description"])
     parser.add_argument("input", nargs="?", type=Path, help=CLI_TEXT["help_input"])
+    parser.add_argument("-o", "--output", type=Path, help=CLI_TEXT["help_output"])
     parser.add_argument("--stock", help=CLI_TEXT["help_stock"])
     parser.add_argument("--kerf-mm", type=int, default=0, help=CLI_TEXT["help_kerf"])
     parser.add_argument("--single-length", action="store_true", help=CLI_TEXT["help_single"])
@@ -110,6 +112,15 @@ def _run(args: argparse.Namespace, log_path: Path) -> int:
     cutting_plan = planner.plan(result.pieces, settings, on_progress=_print_progress)
     for line in format_plan(cutting_plan):
         print(line)
+    if args.output is not None:
+        source = WriteSource(
+            pieces=result.pieces,
+            table=result.table,
+            input_path=result.path,
+            warnings=result.warnings,
+        )
+        written = write_plan(args.output, cutting_plan, source)
+        print(CLI_TEXT["output_written"].format(path=written))
     return EXIT_UNPLACED if cutting_plan.unplaced else EXIT_OK
 
 
@@ -166,7 +177,7 @@ def format_plan(plan: CuttingPlan) -> list[str]:
                     index=index,
                     stock_m=format_metres(group.bar.stock_length_mm),
                     count=group.count,
-                    cuts=th.format_cuts(_cut_runs(group.bar.cuts)),
+                    cuts=th.format_cuts(cut_runs(group.bar.cuts)),
                     remnant_m=format_metres(detail.usage.remnant_mm),
                     tag=tag,
                 )
@@ -192,18 +203,6 @@ def format_plan(plan: CuttingPlan) -> list[str]:
                 )
             )
     return lines
-
-
-def _cut_runs(cuts: Sequence[Cut]) -> list[tuple[str, int, int]]:
-    """Collapse consecutive identical cuts into ``(no, length_mm, count)``."""
-    runs: list[tuple[str, int, int]] = []
-    for cut in cuts:
-        no, length = cut.no, cut.length_mm
-        if runs and runs[-1][0] == no and runs[-1][1] == length:
-            runs[-1] = (no, length, runs[-1][2] + 1)
-        else:
-            runs.append((no, length, 1))
-    return runs
 
 
 def _print_progress(event: ProgressEvent) -> None:
