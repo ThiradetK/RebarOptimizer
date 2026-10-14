@@ -247,6 +247,7 @@ class PlanPreview(QWidget):
             left = self._bar_left()
             painter.save()
             painter.setClipRect(QRectF(left, bar_top, visible_width, BAR_HEIGHT))
+            kerf_rects: list[QRectF] = []
             for segment in row.segments:
                 x = left + segment.start_mm * scale
                 w = max(segment.length_mm * scale, 1.0)
@@ -258,12 +259,16 @@ class PlanPreview(QWidget):
                         painter.setPen(QPen(QColor("#1f2328")))
                         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
                 elif segment.kind is SegmentKind.KERF:
-                    painter.fillRect(rect, kerf_color)
+                    kerf_rects.append(rect)
                 elif segment.kind is SegmentKind.REUSABLE:
                     painter.fillRect(rect, reusable_color)
                     painter.fillRect(rect, hatch)
                 else:
                     painter.fillRect(rect, waste_color)
+            # Kerf lines last: a 3 mm cut is often narrower than a pixel and would
+            # otherwise be painted over by the next piece.
+            for rect in kerf_rects:
+                painter.fillRect(rect, kerf_color)
             painter.setPen(border)
             painter.drawRect(QRectF(left, bar_top, full_width, BAR_HEIGHT))
             painter.restore()
