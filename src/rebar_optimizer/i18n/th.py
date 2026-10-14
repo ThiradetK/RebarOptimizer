@@ -296,3 +296,89 @@ def format_cuts(cuts: Iterable[tuple[str, int, int]]) -> str:
         text = f"No.{no}={format_metres(length_mm)}"
         parts.append(text if count == 1 else f"{text} x {count}")
     return ", ".join(parts)
+
+
+# --- GUI text ---------------------------------------------------------------------
+
+GUI_TEXT: dict[str, str] = {
+    "window_title": "Rebar Optimizer — วางแผนตัดเหล็กเส้น",
+    # form
+    "input_group": "ไฟล์รายการชิ้นงาน",
+    "input_placeholder": "เลือกไฟล์ Excel (.xlsx) หรือลากไฟล์มาวาง",
+    "browse": "เลือกไฟล์…",
+    "make_template": "สร้างไฟล์ตัวอย่าง…",
+    "stock_group": "เหล็กเส้นที่มีขาย",
+    "stock_label": "ความยาว stock (ม.) คั่นด้วยจุลภาค",
+    "stock_placeholder": "เช่น 10, 12",
+    "mode_mixed": "ผสมความยาวได้",
+    "mode_single": "บังคับความยาวเดียวต่อ Size",
+    "kerf_check": "คิดความกว้างใบตัด",
+    "kerf_suffix": " มม.",
+    "advanced": "ขั้นสูง",
+    "time_limit_label": "เวลาคำนวณสูงสุดต่อ Size",
+    "time_limit_suffix": " วินาที",
+    "animations": "แสดง animation",
+    "compute": "คำนวณ",
+    "clear": "ล้างค่า",
+    "cancel": "ยกเลิก",
+    "log_toggle": "รายละเอียดการคำนวณ",
+    # validation
+    "need_file": "กรุณาเลือกไฟล์ input",
+    # progress
+    "status_ready": "พร้อมคำนวณ",
+    "status_reading": "กำลังอ่านไฟล์…",
+    "status_size": "Size {index}/{total}: {size}",
+    "status_done": "คำนวณเสร็จแล้ว",
+    "status_cancelling": "กำลังยกเลิก…",
+    "status_cancelled": "ยกเลิกการคำนวณแล้ว",
+    "status_failed": "คำนวณไม่สำเร็จ",
+    "log_started": "เริ่มคำนวณ {path}",
+    "log_size_started": "เริ่ม Size {size} ({index}/{total})",
+    "log_size_finished": "เสร็จ Size {size}",
+    # results
+    "results_empty": "ยังไม่มีผลลัพธ์ — กรอกข้อมูลทางซ้ายแล้วกด คำนวณ",
+    "total_stock": "เหล็กรวม",
+    "total_weight": "น้ำหนักรวม",
+    "total_reusable": "เศษใช้ต่อได้",
+    "total_waste": "Waste",
+    "utilization": "ใช้ประโยชน์",
+    "worst_status": "สถานะ",
+    "metres": "{value} ม.",
+    "kg": "{value:,.1f} kg",
+    "percent": "{value:.1f}%",
+    "weight_unknown": "—",
+    "unplaced_banner": "มีชิ้นงาน {count} ชิ้นที่วางไม่ได้ (ยาวกว่าเหล็กเส้นที่ยาวที่สุด):",
+    "unplaced_item": "Size {size} No {no} ยาว {length_m} ม. × {quantity}",
+    "warnings_title": "คำเตือน",
+    "save": "บันทึก Excel…",
+    "open_file": "เปิดไฟล์",
+    "open_folder": "เปิดโฟลเดอร์",
+    "saved": "บันทึกไฟล์แล้ว: {path}",
+    # dialogs
+    "dialog_open_title": "เลือกไฟล์รายการชิ้นงาน",
+    "dialog_save_title": "บันทึกแผนการตัด",
+    "dialog_template_title": "สร้างไฟล์ตัวอย่าง",
+    "xlsx_filter": "Excel (*.xlsx)",
+    "default_output": "cutting_plan_{stamp}.xlsx",
+    "default_template": "rebar_input_template.xlsx",
+    "template_saved": "สร้างไฟล์ตัวอย่างแล้ว: {path}",
+    "error_title": "พบปัญหา",
+    "error_input_header": "แก้ไขไฟล์ input ตามรายการนี้แล้วลองใหม่ (ข้อมูลที่กรอกไว้ยังอยู่ครบ):",
+    "error_settings_header": "แก้ไขค่าที่กรอกตามรายการนี้แล้วลองใหม่:",
+    "error_output_header": "บันทึกไฟล์ไม่สำเร็จ ผลการคำนวณยังอยู่ กดบันทึกซ้ำได้:",
+    "unexpected_title": "เกิดข้อผิดพลาด",
+    "unexpected": (
+        "เกิดข้อผิดพลาดที่ไม่คาดคิด ข้อมูลที่กรอกไว้ยังอยู่ครบ\nรายละเอียดถูกบันทึกไว้ที่ไฟล์ log:\n{log_path}"
+    ),
+    "copy": "คัดลอก",
+    "close": "ปิด",
+}
+
+GUI_SIZE_TABLE_HEADERS: tuple[str, ...] = (
+    "Size",
+    "จำนวนเส้น",
+    "เหล็กรวม (ม.)",
+    "ใช้ประโยชน์",
+    "สถานะ",
+    "gap",
+)

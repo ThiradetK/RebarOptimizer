@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
+# GUI tests run headless; must be set before any QApplication exists.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -9,6 +14,7 @@ import openpyxl
 import pytest
 
 from rebar_optimizer.logging_config import LOG_DIR_ENV
+from rebar_optimizer.ui.user_settings import SETTINGS_ENV
 
 DEFAULT_HEADERS = ("Size", "No", "Length", "Quantity")
 
@@ -21,6 +27,14 @@ def _isolated_log_dir(
 ) -> None:
     """Never write logs to the real %LOCALAPPDATA% during tests."""
     monkeypatch.setenv(LOG_DIR_ENV, str(tmp_path_factory.getbasetemp() / "logs"))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_user_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Never touch the real %APPDATA% settings during tests."""
+    path = tmp_path / "user_settings.json"
+    monkeypatch.setenv(SETTINGS_ENV, str(path))
+    return path
 
 
 @pytest.fixture
