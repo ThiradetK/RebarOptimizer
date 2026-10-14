@@ -239,7 +239,13 @@ STATUS_LABELS_SHEET: dict[str, str] = {
     "seed": "random seed",
     "worst_status": "สถานะแย่สุดของทุก Size",
     "warnings": "คำเตือน",
+    "note": "หมายเหตุ",
 }
+
+REPRODUCIBILITY_NOTE = (
+    "ถ้าคำนวณใหม่ด้วยค่าเดิม ยอดเหล็กรวม น้ำหนัก และรายการสั่งซื้อของ Size ที่เป็น OPTIMAL "
+    "จะเท่าเดิมทุกครั้ง แต่การจัดชิ้นลงแต่ละเส้นอาจต่างไปได้ เพราะมีหลายแผนที่ดีที่สุดเท่ากัน"
+)
 
 SUBTOTAL_TEXT = "รวม {size}"
 

@@ -219,6 +219,8 @@ def test_status_sheet(template_output: tuple[CuttingPlan, openpyxl.Workbook]) ->
     assert status[labels["stock_lengths"]] == "10.000, 12.000"
     assert status[labels["stock_mode"]] == "ผสมความยาวได้"
     assert status[labels["kerf"]] == 3
+    all_rows = dict(r[:2] for r in rows(workbook[th.SHEET_NAMES["status"]]) if r[0])
+    assert all_rows[labels["note"]] == th.REPRODUCIBILITY_NOTE
 
 
 def test_input_sheet_copies_extra_columns_and_row_numbers(

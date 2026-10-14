@@ -24,7 +24,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from rebar_optimizer import __version__
 from rebar_optimizer.domain.errors import Issue, IssueCode, OutputWriteError
-from rebar_optimizer.domain.models import CuttingPlan, Piece, PieceKey
+from rebar_optimizer.domain.models import CuttingPlan, Piece, PieceKey, SolveStatus
 from rebar_optimizer.domain.weights import unit_weight_kg_per_m
 from rebar_optimizer.i18n import th
 from rebar_optimizer.io.reader import InputTable
@@ -318,6 +318,8 @@ def _status_sheet(
         (labels["seed"], settings.random_seed),
         (labels["worst_status"], th.STATUS_LABELS[worst] if worst else None),
     ]
+    if any(sp.status is not SolveStatus.GREEDY for sp in plan.sizes if sp.groups):
+        rows.append((labels["note"], th.REPRODUCIBILITY_NOTE))
     messages = th.format_issues(issues)
     rows.append((labels["warnings"], messages[0] if messages else th.NONE_TEXT))
     rows.extend((None, message) for message in messages[1:])
