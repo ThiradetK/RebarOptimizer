@@ -1,0 +1,37 @@
+Rebar Optimizer — third-party software notice
+=============================================
+
+This program bundles the following open-source components. Each component's
+own license file is included in this folder under the component's name
+(copied from the installed package at build time).
+
+Component           License                         Used for
+------------------  ------------------------------  -----------------------------
+Qt 6 / PySide6      LGPL-3.0-only (see LGPL-3.0.txt  Graphical user interface
+                    and GPL-3.0.txt)
+Shiboken6           LGPL-3.0-only                   Python bindings for Qt
+OR-Tools            Apache-2.0                      CP-SAT and GLOP solvers
+openpyxl            MIT                             Reading and writing .xlsx
+et_xmlfile          MIT                             (openpyxl dependency)
+NumPy               BSD-3-Clause (+ bundled libs)   Knapsack pricing, OR-Tools
+pandas              BSD-3-Clause                    (OR-Tools dependency)
+protobuf            BSD-3-Clause                    (OR-Tools dependency)
+absl-py             Apache-2.0                      (OR-Tools dependency)
+immutabledict       MIT                             (OR-Tools dependency)
+python-dateutil     Apache-2.0 / BSD-3-Clause       (pandas dependency)
+six                 MIT                             (python-dateutil dependency)
+tzdata              Apache-2.0                      (pandas dependency)
+Python              PSF License                     Runtime
+
+Qt and PySide6 under the LGPL
+-----------------------------
+Qt and PySide6 are used under the GNU Lesser General Public License v3.
+The program is distributed as a folder ("onedir"), not a single file, so the
+Qt and PySide6 libraries (Qt6*.dll, pyside6*.dll, shiboken6*.dll and the
+PySide6/ and shiboken6/ folders) are separate files that you may replace with
+your own compatible builds.
+
+Source code of Qt:      https://download.qt.io/official_releases/qt/
+Source code of PySide6: https://download.qt.io/official_releases/QtForPython/
+The Qt and PySide6 versions used are listed in the "versions.txt" file next
+to this notice.

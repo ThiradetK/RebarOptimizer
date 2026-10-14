@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from types import TracebackType
 
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from rebar_optimizer import __version__
@@ -18,6 +22,10 @@ from rebar_optimizer.ui.main_window import MainWindow
 from rebar_optimizer.ui.theme import apply_theme
 
 logger = logging.getLogger(__name__)
+
+RESOURCES = Path(__file__).resolve().parent / "resources"
+STARTUP_CHECK_ENV = "REBAR_OPTIMIZER_STARTUP_CHECK"
+"""When set, quit right after the main window appears (measures start-up time)."""
 
 
 def install_excepthook(log_path: Path) -> None:
@@ -50,17 +58,33 @@ def install_excepthook(log_path: Path) -> None:
     threading.excepthook = thread_hook
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def app_icon() -> QIcon:
+    return QIcon(str(RESOURCES / "app.svg"))
+
+
+def main(argv: Sequence[str] | None = None, started: float | None = None) -> int:
+    started = time.perf_counter() if started is None else started
     log_path = setup_logging()
     logger.info("rebar_optimizer %s gui starting", __version__)
     install_excepthook(log_path)
     app = QApplication(list(argv) if argv is not None else sys.argv)
     app.setApplicationName("Rebar Optimizer")
     app.setApplicationVersion(__version__)
+    app.setWindowIcon(app_icon())
     apply_theme(app)
     window = MainWindow(log_path=log_path)
     window.show()
+    QTimer.singleShot(0, lambda: _report_startup(app, started))
     return app.exec()
+
+
+def _report_startup(app: QApplication, started: float) -> None:
+    """Log the time until the main window is up; quit at once in a startup check."""
+    elapsed = time.perf_counter() - started
+    logger.info("main window shown after %.2f s", elapsed)
+    if os.environ.get(STARTUP_CHECK_ENV):
+        print(f"startup {elapsed:.2f}s")
+        app.quit()
 
 
 if __name__ == "__main__":

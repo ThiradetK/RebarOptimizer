@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="#1f3b63"/>
+  <!-- three rebar bars, each cut into pieces; the last segment is a remnant -->
+  <g stroke="#0f1f36" stroke-width="4">
+    <rect x="36" y="56" width="104" height="34" rx="6" fill="#f5a65b"/>
+    <rect x="144" y="56" width="58" height="34" rx="6" fill="#7fa8f5"/>
+    <rect x="206" y="56" width="16" height="34" rx="4" fill="#9aa3b5"/>
+
+    <rect x="36" y="111" width="70" height="34" rx="6" fill="#7fa8f5"/>
+    <rect x="110" y="111" width="70" height="34" rx="6" fill="#7fa8f5"/>
+    <rect x="184" y="111" width="38" height="34" rx="6" fill="#6cc48a"/>
+
+    <rect x="36" y="166" width="136" height="34" rx="6" fill="#c79bf2"/>
+    <rect x="176" y="166" width="46" height="34" rx="6" fill="#f5a65b"/>
+  </g>
+</svg>
