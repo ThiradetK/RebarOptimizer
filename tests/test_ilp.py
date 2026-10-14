@@ -10,7 +10,7 @@ from benchmarks.generate import PRESETS, make_pieces
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from rebar_optimizer.domain.errors import Cancelled, IssueCode
+from rebar_optimizer.domain.errors import Cancelled
 from rebar_optimizer.domain.models import Piece, SolveStatus
 from rebar_optimizer.domain.settings import OptimizerSettings, StockMode
 from rebar_optimizer.services import planner
@@ -162,14 +162,14 @@ def test_same_seed_same_totals_when_optimal() -> None:
     assert fingerprint() == first
 
 
-def test_greedy_only_plans_are_fully_deterministic() -> None:
+def test_greedy_only_plans_are_fully_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Make the ILP find nothing so that every size keeps its greedy result.
+    monkeypatch.setattr(planner, "solve_patterns", lambda *_, **__: None)
     pieces = make_pieces(PRESETS["medium"], seed=0)
-    # max_patterns=1 forces the greedy result (pattern limit exceeded).
-    settings_ = OptimizerSettings(stock_lengths_mm=(10000, 12000), max_patterns=1)
+    settings_ = OptimizerSettings(stock_lengths_mm=(10000, 12000))
     runs = [planner.plan(pieces, settings_) for _ in range(3)]
     assert all(s.status is SolveStatus.GREEDY for s in runs[0].sizes)
     assert runs[0].sizes == runs[1].sizes == runs[2].sizes
-    assert {i.code for i in runs[0].issues} == {IssueCode.PATTERN_LIMIT_EXCEEDED}
 
 
 def test_cancel_during_cp_sat_is_prompt(hard_size: list[Piece]) -> None:

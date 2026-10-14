@@ -36,6 +36,7 @@ from rebar_optimizer.services.postprocess import classify_remnant, postprocess
 from rebar_optimizer.services.summary import bar_detail
 from rebar_optimizer.solver import kerf
 from rebar_optimizer.solver.base import Demand, RawBar, total_stock_mm
+from rebar_optimizer.solver.colgen import solve_colgen
 from rebar_optimizer.solver.greedy import GreedySolver
 from rebar_optimizer.solver.ilp import IlpOptions, solve_patterns
 from rebar_optimizer.solver.patterns import enumerate_patterns
@@ -215,20 +216,23 @@ def _solve_lengths(
     pattern_set = enumerate_patterns(
         demand, stock_set, kerf_mm, settings.max_patterns, extra_bars=greedy_bars, cancel=cancel
     )
-    if pattern_set is None:
-        issues.append(
-            Issue.warning(
-                IssueCode.PATTERN_LIMIT_EXCEEDED, size=size, max_patterns=settings.max_patterns
-            )
-        )
-        return _Solved(bars=greedy_bars, status=SolveStatus.GREEDY, lower_bound_mm=bound)
-
     options = IlpOptions(
         time_limit_s=max(MIN_ILP_TIME_S, time_limit_s - (time.monotonic() - started)),
         random_seed=settings.random_seed,
         num_workers=settings.num_workers,
     )
-    result = solve_patterns(demand, pattern_set, options, hint=greedy_bars, cancel=cancel)
+    if pattern_set is None:
+        # Too many patterns to enumerate: column generation (5.5).
+        issues.append(
+            Issue.warning(
+                IssueCode.PATTERN_LIMIT_EXCEEDED, size=size, max_patterns=settings.max_patterns
+            )
+        )
+        result = solve_colgen(
+            demand, stock_set, kerf_mm, options, initial_bars=greedy_bars, cancel=cancel
+        )
+    else:
+        result = solve_patterns(demand, pattern_set, options, hint=greedy_bars, cancel=cancel)
     if result is None:
         issues.append(Issue.warning(IssueCode.TIME_LIMIT_HIT, size=size, seconds=time_limit_s))
         return _Solved(bars=greedy_bars, status=SolveStatus.GREEDY, lower_bound_mm=bound)

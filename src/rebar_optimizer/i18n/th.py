@@ -94,7 +94,8 @@ MESSAGES: dict[IssueCode, str] = {
     ),
     IssueCode.UNPLACED_TOO_LONG: "ยาวกว่าเหล็กเส้นที่ยาวที่สุด ({longest_stock_m} ม.)",
     IssueCode.PATTERN_LIMIT_EXCEEDED: (
-        "Size {size}: รูปแบบการตัดมีมากกว่า {max_patterns} แบบ จึงใช้ผลจากวิธีเร็ว (GREEDY) ซึ่งอาจยังไม่ดีที่สุด"
+        "Size {size}: รูปแบบการตัดมีมากกว่า {max_patterns} แบบ จึงใช้ column generation "
+        "(สถานะ HEURISTIC) ซึ่งใกล้เคียงดีที่สุด ดูความห่างจากค่าที่ดีที่สุดได้ที่ gap %"
     ),
     IssueCode.TIME_LIMIT_HIT: (
         "Size {size}: คำนวณครบเวลา {seconds} วินาทีก่อนพิสูจน์ได้ว่าดีที่สุด "
