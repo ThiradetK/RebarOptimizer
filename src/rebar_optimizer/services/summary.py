@@ -89,6 +89,32 @@ def summarize_size(plan: SizePlan) -> SizeSummary:
     )
 
 
+@dataclass(frozen=True)
+class BarCount:
+    size: str
+    stock_length_mm: int
+    count: int
+    inventory: bool
+    """Taken from inventory rather than purchased (phase 8)."""
+
+
+def bar_counts(plan: CuttingPlan) -> list[BarCount]:
+    """Bars per size and stock length: sizes in plan order, purchased lengths
+    shortest first, then inventory lengths shortest first."""
+    result: list[BarCount] = []
+    for size_plan in plan.sizes:
+        summary = summarize_size(size_plan)
+        result += [
+            BarCount(size_plan.size, stock, n, inventory=False)
+            for stock, n in summary.bars_by_stock.items()
+        ]
+        result += [
+            BarCount(size_plan.size, stock, n, inventory=True)
+            for stock, n in summary.inventory_by_stock.items()
+        ]
+    return result
+
+
 def cut_runs(cuts: Sequence[Cut]) -> list[tuple[str, int, int]]:
     """Collapse consecutive identical cuts into ``(no, length_mm, count)``."""
     runs: list[tuple[str, int, int]] = []

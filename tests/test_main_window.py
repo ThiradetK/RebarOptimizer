@@ -5,6 +5,7 @@ from pathlib import Path
 
 import openpyxl
 import pytest
+from PySide6.QtGui import QGuiApplication
 from pytestqt.qtbot import QtBot
 
 from benchmarks.generate import PRESETS, make_pieces, write_xlsx
@@ -118,6 +119,10 @@ def test_successful_run_shows_results_and_saves(
     compute(qtbot, window)
     assert window.status_label.text() == GUI_TEXT["status_done"]
     assert window.size_table.rowCount() == 3
+    counts = [window.bar_counts_list.item(i).text() for i in range(window.bar_counts_list.count())]
+    assert counts and all(t.startswith("Size ") and t.endswith("เมตร") for t in counts)
+    window.copy_bar_counts()
+    assert QGuiApplication.clipboard().text() == "\n".join(counts)
     assert window.metric_values["total_stock"].text().endswith("ม.")
     assert window.metric_values["total_weight"].text().endswith("kg")
     assert not window.unplaced_banner.isVisible()

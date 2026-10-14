@@ -124,6 +124,11 @@ def format_metres(length_mm: int) -> str:
     return f"{length_mm / 1000:.3f}"
 
 
+def format_metres_short(length_mm: int) -> str:
+    """``10000`` -> ``"10"``, ``7300`` -> ``"7.3"``, ``3505`` -> ``"3.505"``."""
+    return f"{length_mm / 1000:.3f}".rstrip("0").rstrip(".")
+
+
 def _format_value(value: object) -> str:
     if isinstance(value, bool):
         return str(value)
@@ -277,6 +282,10 @@ REPRODUCIBILITY_NOTE = (
 
 SUBTOTAL_TEXT = "รวม {size}"
 
+BAR_COUNT_LINE = "Size {size} จำนวน {count} เส้น เหล็ก {stock_m} เมตร"
+"""One line of the per-size, per-length bar summary (CLI and GUI)."""
+BAR_COUNT_TITLE = "สรุปจำนวนเส้นแยกตาม Size และความยาว"
+
 STOCK_SOURCE_LABELS: dict[str, str] = {
     "new": "ซื้อใหม่",
     "inventory": "คงคลัง",
@@ -323,6 +332,14 @@ CLI_TEXT: dict[str, str] = {
     "selftest_ok": "selftest ผ่าน",
     "selftest_failed": "selftest ไม่ผ่าน รายละเอียดอยู่ในไฟล์ log: {log_path}",
 }
+
+
+def format_bar_count(size: str, count: int, stock_length_mm: int, inventory: bool) -> str:
+    """``Size DB12 จำนวน 5 เส้น เหล็ก 10 เมตร`` (+ ``(คงคลัง)`` for inventory bars)."""
+    line = BAR_COUNT_LINE.format(
+        size=size, count=count, stock_m=format_metres_short(stock_length_mm)
+    )
+    return line + INVENTORY_TAG if inventory else line
 
 
 def format_cuts(cuts: Iterable[tuple[str, int, int]]) -> str:
@@ -408,6 +425,7 @@ GUI_TEXT: dict[str, str] = {
         "เกิดข้อผิดพลาดที่ไม่คาดคิด ข้อมูลที่กรอกไว้ยังอยู่ครบ\nรายละเอียดถูกบันทึกไว้ที่ไฟล์ log:\n{log_path}"
     ),
     "copy": "คัดลอก",
+    "copied": "คัดลอกแล้ว",
     "close": "ปิด",
     # cutting plan preview
     "preview_title": "ภาพแผนการตัด",

@@ -32,7 +32,7 @@ from rebar_optimizer.io.writer import WriteSource, write_plan
 from rebar_optimizer.logging_config import setup_logging
 from rebar_optimizer.services import planner
 from rebar_optimizer.services.cancel import ProgressEvent, ProgressKind
-from rebar_optimizer.services.summary import bar_detail, cut_runs, summarize_size
+from rebar_optimizer.services.summary import bar_counts, bar_detail, cut_runs, summarize_size
 
 EXIT_OK = 0
 EXIT_INPUT = 1
@@ -205,6 +205,14 @@ def format_plan(plan: CuttingPlan) -> list[str]:
                 inventory_m=format_metres(total_inventory),
             )
         )
+    counts = bar_counts(plan)
+    if counts:
+        lines.append("")
+        lines.append(th.BAR_COUNT_TITLE + ":")
+        lines += [
+            "  " + th.format_bar_count(c.size, c.count, c.stock_length_mm, c.inventory)
+            for c in counts
+        ]
     if plan.unplaced:
         lines.append("")
         lines.append(CLI_TEXT["unplaced_header"])

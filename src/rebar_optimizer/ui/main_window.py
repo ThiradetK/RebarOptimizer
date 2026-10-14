@@ -73,7 +73,7 @@ from rebar_optimizer.io.reader import SUPPORTED_SUFFIXES
 from rebar_optimizer.io.template import write_template
 from rebar_optimizer.io.writer import WriteSource, write_plan
 from rebar_optimizer.services.cancel import ProgressEvent, ProgressKind
-from rebar_optimizer.services.summary import plan_totals, summarize_size
+from rebar_optimizer.services.summary import bar_counts, plan_totals, summarize_size
 from rebar_optimizer.ui import animations, user_settings
 from rebar_optimizer.ui.theme import Theme, current_theme
 from rebar_optimizer.ui.user_settings import UserSettings
@@ -369,6 +369,18 @@ class MainWindow(QMainWindow):
         self.size_table.setMaximumHeight(150)
         layout.addWidget(self.size_table)
 
+        counts_header = QHBoxLayout()
+        self.bar_counts_title = QLabel(th.BAR_COUNT_TITLE)
+        self.bar_counts_title.setObjectName("metricLabel")
+        self.copy_counts_button = QPushButton(GUI_TEXT["copy"])
+        self.copy_counts_button.clicked.connect(self.copy_bar_counts)
+        counts_header.addWidget(self.bar_counts_title, 1)
+        counts_header.addWidget(self.copy_counts_button)
+        layout.addLayout(counts_header)
+        self.bar_counts_list = QListWidget()
+        self.bar_counts_list.setMaximumHeight(120)
+        layout.addWidget(self.bar_counts_list)
+
         self.preview_tabs = QTabWidget()
         self.preview_tabs.setDocumentMode(True)
         layout.addWidget(self.preview_tabs, 1)
@@ -628,6 +640,9 @@ class MainWindow(QMainWindow):
         result_widgets = (
             self.summary_card,
             self.size_table,
+            self.bar_counts_title,
+            self.copy_counts_button,
+            self.bar_counts_list,
             self.preview_tabs,
             self.warnings_title,
             self.warnings_list,
@@ -707,11 +722,26 @@ class MainWindow(QMainWindow):
                     item.setToolTip(th.STATUS_LABELS[size_plan.status])
                 self.size_table.setItem(row, column, item)
 
+        self.bar_counts_list.clear()
+        self.bar_counts_list.addItems(
+            [
+                th.format_bar_count(c.size, c.count, c.stock_length_mm, c.inventory)
+                for c in bar_counts(plan)
+            ]
+            or [th.NONE_TEXT]
+        )
+
         self._show_previews(plan)
 
         self.warnings_list.clear()
         messages = [th.format_issue(i) for i in (*outcome.source.warnings, *plan.issues)]
         self.warnings_list.addItems(messages or [th.NONE_TEXT])
+
+    def copy_bar_counts(self) -> None:
+        """Copy the per-size, per-length lines, e.g. to paste into an order."""
+        lines = [self.bar_counts_list.item(i).text() for i in range(self.bar_counts_list.count())]
+        QGuiApplication.clipboard().setText("\n".join(lines))
+        self.toast.show_message(GUI_TEXT["copied"])
 
     def _show_previews(self, plan: CuttingPlan) -> None:
         self.preview_tabs.clear()
