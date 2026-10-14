@@ -51,6 +51,7 @@ class IssueCode(StrEnum):
     # --- planning ---
     PIECES_UNPLACED = "PIECES_UNPLACED"
     UNPLACED_TOO_LONG = "UNPLACED_TOO_LONG"
+    WEIGHT_UNKNOWN = "WEIGHT_UNKNOWN"
     # --- output ---
     OUTPUT_LOCKED = "OUTPUT_LOCKED"
     OUTPUT_FAILED = "OUTPUT_FAILED"

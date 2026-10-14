@@ -93,6 +93,9 @@ MESSAGES: dict[IssueCode, str] = {
         "กรุณาตรวจสอบความยาวชิ้นงานหรือเพิ่มความยาวเหล็กเส้น"
     ),
     IssueCode.UNPLACED_TOO_LONG: "ยาวกว่าเหล็กเส้นที่ยาวที่สุด ({longest_stock_m} ม.)",
+    IssueCode.WEIGHT_UNKNOWN: (
+        'คำนวณน้ำหนักของ Size "{size}" ไม่ได้ เพราะไม่พบตัวเลขขนาดท้ายชื่อ (เช่น DB12) จึงเว้นช่องน้ำหนักว่างไว้'
+    ),
     # output
     IssueCode.OUTPUT_LOCKED: ("บันทึกไฟล์ไม่ได้ เพราะไฟล์ {name} เปิดค้างอยู่ กรุณาปิดไฟล์ {name} แล้วลองใหม่"),
     IssueCode.OUTPUT_FAILED: "บันทึกไฟล์ {path} ไม่ได้: {reason}",
@@ -149,6 +152,90 @@ def format_issues(issues: Iterable[Issue]) -> list[str]:
     return [format_issue_with_severity(i) for i in ordered]
 
 
+# --- output workbook --------------------------------------------------------------
+
+NONE_TEXT = "ไม่มี"
+CHECK_OK = "✓"
+CHECK_FAIL = "✗"
+TOTAL_TEXT = "รวม"
+
+SHEET_NAMES: dict[str, str] = {
+    "plan": "แผนการตัด",
+    "details": "รายละเอียดการตัด",
+    "summary": "สรุปต่อ Size",
+    "purchase": "รายการสั่งซื้อ",
+    "remnants": "เศษคงเหลือ",
+    "unplaced": "วางไม่ได้",
+    "check": "ตรวจสอบจำนวน",
+    "status": "ตั้งค่าและสถานะ",
+    "input": "ข้อมูล Input",
+}
+
+HEADERS: dict[str, tuple[str, ...]] = {
+    "plan": (
+        "Size",
+        "แบบที่",
+        "จำนวนเส้นที่ตัดแบบนี้",
+        "ความยาว stock (m)",
+        "รายการชิ้น",
+        "จำนวนชิ้นต่อเส้น",
+        "ความยาวชิ้นรวม (m)",
+        "kerf loss (m)",
+        "เศษ (m)",
+        "เศษนำไปใช้ได้",
+        "ชิ้นยาวสุดที่ตัดจากเศษได้ (m)",
+    ),
+    "details": (
+        "Size",
+        "แบบที่",
+        "stock (m)",
+        "No",
+        "Length (m)",
+        "ชิ้นต่อเส้น",
+        "จำนวนเส้น",
+        "ชิ้นรวม",
+    ),
+    "summary": (
+        "Size",
+        "จำนวนเส้นแยกตาม stock",
+        "จำนวนเส้นรวม",
+        "stock รวม (m)",
+        "ชิ้นงานรวม (m)",
+        "เศษใช้ต่อได้รวม (m)",
+        "Waste รวม (m)",
+        "kerf รวม (m)",
+        "% utilization",
+        "น้ำหนักซื้อ (kg)",
+        "น้ำหนักเศษใช้ต่อได้ (kg)",
+        "น้ำหนัก Waste (kg)",
+        "สถานะ solver",
+        "lower bound (m)",
+        "gap %",
+    ),
+    "purchase": ("Size", "ความยาว stock (m)", "จำนวนเส้น", "ความยาวรวม (m)", "น้ำหนัก (kg)"),
+    "remnants": ("Size", "ความยาวเศษ (m)", "จำนวน", "ชิ้นยาวสุดที่ตัดได้ (m)"),
+    "unplaced": ("Size", "No", "Length (m)", "Quantity", "เหตุผล"),
+    "check": ("Size", "No", "จำนวน Input", "จำนวนที่ตัด", "จำนวนที่วางไม่ได้", "ผล"),
+    "status": ("หัวข้อ", "ค่า"),
+}
+
+INPUT_ROW_HEADER = "แถวใน Excel"
+
+STATUS_LABELS_SHEET: dict[str, str] = {
+    "input_file": "ไฟล์ input",
+    "created_at": "วันเวลาที่คำนวณ",
+    "version": "เวอร์ชันโปรแกรม",
+    "stock_lengths": "ความยาว stock (m)",
+    "stock_mode": "โหมดความยาว stock",
+    "kerf": "ความกว้างใบตัด (มม.)",
+    "time_limit": "เวลาคำนวณสูงสุดต่อ Size (วินาที)",
+    "seed": "random seed",
+    "worst_status": "สถานะแย่สุดของทุก Size",
+    "warnings": "คำเตือน",
+}
+
+SUBTOTAL_TEXT = "รวม {size}"
+
 # --- CLI text ---------------------------------------------------------------------
 
 CLI_TEXT: dict[str, str] = {
@@ -177,6 +264,8 @@ CLI_TEXT: dict[str, str] = {
     "unplaced_header": "ชิ้นงานที่วางไม่ได้:",
     "unplaced_item": "  Size {size} No {no} ยาว {length_m} ม. × {quantity} ชิ้น — {reason}",
     "grand_total": "รวมทุก Size: เหล็ก {bars} เส้น ยาวรวม {stock_m} ม.",
+    "help_output": "ไฟล์ Excel ผลลัพธ์ (.xlsx)",
+    "output_written": "บันทึกไฟล์แล้ว: {path}",
     "warnings_header": "คำเตือน:",
     "errors_header": "พบปัญหา:",
     "cancelled": "ยกเลิกการคำนวณแล้ว",

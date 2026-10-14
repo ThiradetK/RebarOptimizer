@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 
-from rebar_optimizer.domain.models import BarGroup, SizePlan
+from rebar_optimizer.domain.models import BarGroup, Cut, SizePlan
 from rebar_optimizer.services.postprocess import classify_remnant
 from rebar_optimizer.solver import kerf
 
@@ -72,3 +73,14 @@ def summarize_size(plan: SizePlan) -> SizeSummary:
         kerf_mm=kerf_total,
         piece_count=piece_count,
     )
+
+
+def cut_runs(cuts: Sequence[Cut]) -> list[tuple[str, int, int]]:
+    """Collapse consecutive identical cuts into ``(no, length_mm, count)``."""
+    runs: list[tuple[str, int, int]] = []
+    for cut in cuts:
+        if runs and runs[-1][0] == cut.no and runs[-1][1] == cut.length_mm:
+            runs[-1] = (cut.no, cut.length_mm, runs[-1][2] + 1)
+        else:
+            runs.append((cut.no, cut.length_mm, 1))
+    return runs
