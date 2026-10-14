@@ -57,6 +57,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "N", "PL"]
 ignore = [
     "PLR0913",  # too many arguments
     "PLR2004",  # magic value comparison
+    "N818",     # exception names fixed by PLAN.md (InvariantViolation, Cancelled)
     "RUF001",   # ambiguous unicode chars (Thai text)
     "RUF002",
     "RUF003",
