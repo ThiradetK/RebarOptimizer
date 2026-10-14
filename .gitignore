@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Generated outputs
+*.xlsx
+!tests/data/*.xlsx
+~$*.xlsx
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
