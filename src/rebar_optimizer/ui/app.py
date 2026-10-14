@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from types import TracebackType
 
+import shiboken6
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -75,7 +76,14 @@ def main(argv: Sequence[str] | None = None, started: float | None = None) -> int
     window = MainWindow(log_path=log_path)
     window.show()
     QTimer.singleShot(0, lambda: _report_startup(app, started))
-    return app.exec()
+    exit_code = app.exec()
+    # Destroy the window while QApplication still exists. Left to interpreter
+    # shutdown, the order is arbitrary and Windows sometimes reported an access
+    # violation / fast-fail on exit (seen in CI's startup check, ~10% of runs).
+    shiboken6.delete(window)
+    del window
+    app.processEvents()
+    return exit_code
 
 
 def _report_startup(app: QApplication, started: float) -> None:
