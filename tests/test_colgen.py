@@ -4,10 +4,10 @@ import itertools
 from collections import Counter
 
 import pytest
-from benchmarks.generate import PRESETS, make_pieces
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from benchmarks.generate import PRESETS, make_pieces
 from rebar_optimizer.domain.errors import Cancelled, IssueCode
 from rebar_optimizer.domain.models import SolveStatus
 from rebar_optimizer.domain.settings import OptimizerSettings

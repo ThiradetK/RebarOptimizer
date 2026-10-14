@@ -6,10 +6,10 @@ from collections import Counter
 from functools import cache
 
 import pytest
-from benchmarks.generate import PRESETS, make_pieces
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from benchmarks.generate import PRESETS, make_pieces
 from rebar_optimizer.domain.errors import Cancelled
 from rebar_optimizer.domain.models import Piece, SolveStatus
 from rebar_optimizer.domain.settings import OptimizerSettings, StockMode

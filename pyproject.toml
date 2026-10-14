@@ -28,6 +28,9 @@ dev = [
 [project.scripts]
 rebar-optimizer = "rebar_optimizer.cli:main"
 
+[project.gui-scripts]
+rebar-optimizer-gui = "rebar_optimizer.ui.app:main"
+
 [tool.setuptools.dynamic]
 version = { attr = "rebar_optimizer.__version__" }
 
@@ -68,8 +71,13 @@ ignore = [
     "RUF003",
 ]
 
+[tool.ruff.lint.isort]
+known-first-party = ["rebar_optimizer", "benchmarks", "tests"]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PLR0915", "PLC0415"]
+# Widget-building methods are long by nature; lambdas guard slots from Qt's `checked` argument.
+"src/rebar_optimizer/ui/**" = ["PLR0915", "PLW0108"]
 
 # --- mypy -------------------------------------------------------------------
 [tool.mypy]
