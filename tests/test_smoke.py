@@ -33,9 +33,15 @@ def test_ortools_cp_sat_importable() -> None:
 
 
 def test_core_packages_do_not_import_qt() -> None:
-    import importlib
+    # Run in a fresh interpreter: pytest-qt already imports PySide6 in this process.
+    import subprocess
     import sys
 
-    for name in ("domain", "solver", "services", "io", "i18n"):
-        importlib.import_module(f"rebar_optimizer.{name}")
-    assert "PySide6" not in sys.modules
+    code = (
+        "import importlib, sys\n"
+        "for name in ('domain', 'solver', 'services', 'io', 'i18n', 'cli'):\n"
+        "    importlib.import_module(f'rebar_optimizer.{name}')\n"
+        "sys.exit(1 if 'PySide6' in sys.modules else 0)\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], check=False)
+    assert result.returncode == 0
