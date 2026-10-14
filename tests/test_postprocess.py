@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+from collections import Counter
+
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from rebar_optimizer.domain.errors import Cancelled
+from rebar_optimizer.services.cancel import CancelToken
+from rebar_optimizer.services.postprocess import (
+    classify_remnant,
+    downsize_all,
+    postprocess,
+    remove_overcuts,
+    reuse_remnants,
+)
+from rebar_optimizer.solver import kerf
+from rebar_optimizer.solver.base import RawBar, cut_counts, total_stock_mm
+from rebar_optimizer.solver.greedy import GreedySolver
+
+
+def bars(*specs: tuple[int, tuple[int, ...]]) -> list[RawBar]:
+    return [RawBar.of(stock, lengths) for stock, lengths in specs]
+
+
+# --- step 1: over-cut removal ----------------------------------------------------
+
+
+def test_overcut_removed_where_stock_shrinks_most() -> None:
+    stocks = (6000, 10000, 12000)
+    plan = bars((10000, (5000, 4500)), (12000, (5000, 6100)))
+    demand = {5000: 1, 4500: 1, 6100: 1}
+    # Removing from bar 1 leaves the longer remnant (5900 vs 5500), but bar 0 then
+    # shrinks 10 m -> 6 m (saves 4 m) whereas bar 1 only 12 m -> 10 m (saves 2 m).
+    result = downsize_all(remove_overcuts(plan, demand, stocks, 0), stocks, 0)
+    assert cut_counts(result) == Counter(demand)
+    assert total_stock_mm(result) == 6000 + 12000
+
+
+def test_overcut_removed_to_concentrate_remnant_when_nothing_shrinks() -> None:
+    plan = bars((12000, (5000, 5000, 1500)), (12000, (5000, 6000)))
+    demand = {5000: 2, 1500: 1, 6000: 1}
+    result = remove_overcuts(plan, demand, (12000,), 0)
+    assert sorted(b.lengths for b in result) == [(5000, 5000, 1500), (6000,)]
+
+
+def test_overcut_bar_that_empties_is_dropped() -> None:
+    plan = bars((12000, (6000, 6000)), (10000, (4000,)))
+    result = remove_overcuts(plan, {6000: 2}, (10000, 12000), 0)
+    assert result == bars((12000, (6000, 6000)))
+
+
+# --- step 2: downsizing ----------------------------------------------------------
+
+
+def test_downsize_all_picks_shortest_fitting_stock() -> None:
+    result = downsize_all(bars((12000, (3000, 2000)), (12000, (9000,))), (6000, 10000, 12000), 0)
+    assert [b.stock_length_mm for b in result] == [6000, 10000]
+
+
+# --- step 3: remnant reuse -----------------------------------------------------------
+
+
+def test_remnants_absorb_a_whole_bar() -> None:
+    plan = bars((12000, (6000, 3000)), (12000, (6000, 3000)), (12000, (3000, 3000)))
+    result = reuse_remnants(plan, (12000,), 0)
+    assert total_stock_mm(result) == 24000
+    assert cut_counts(result) == cut_counts(plan)
+    assert all(kerf.fits(b.lengths, b.stock_length_mm, 0) for b in result)
+
+
+def test_moving_one_piece_lets_a_bar_shrink() -> None:
+    plan = bars((12000, (5000, 2000)), (12000, (6000, 1000)))
+    result = reuse_remnants(plan, (6000, 12000), 0)
+    assert total_stock_mm(result) == 18000
+    assert cut_counts(result) == cut_counts(plan)
+
+
+def test_remnant_reuse_respects_kerf() -> None:
+    # Bar A = 6000 + 2997 with k=3 leaves remnant 12000 - 8997 - 3 - 3 = 2997.
+    fits_exactly = bars((12000, (6000, 2997)), (12000, (2997,)))
+    assert total_stock_mm(reuse_remnants(fits_exactly, (12000,), 3)) == 12000
+    one_mm_too_long = bars((12000, (6000, 2997)), (12000, (2998,)))
+    assert total_stock_mm(reuse_remnants(one_mm_too_long, (12000,), 3)) == 24000
+
+
+def test_reuse_is_cancellable() -> None:
+    token = CancelToken()
+    token.cancel()
+    with pytest.raises(Cancelled):
+        reuse_remnants(bars((12000, (1000,))), (12000,), 0, token)
+
+
+# --- step 4: classification ------------------------------------------------------
+
+
+def test_remnant_equal_to_shortest_piece_is_reusable() -> None:
+    assert classify_remnant(1200, (1200, 2100, 3500)) == 1200
+
+
+def test_remnant_one_mm_short_is_waste() -> None:
+    assert classify_remnant(1199, (1200, 2100, 3500)) is None
+
+
+def test_longest_cuttable_piece_is_reported() -> None:
+    assert classify_remnant(3000, (1200, 2100, 3500)) == 2100
+
+
+# --- properties ------------------------------------------------------------------
+
+
+@settings(max_examples=60, deadline=None)
+@given(
+    demand=st.dictionaries(st.integers(300, 6000), st.integers(1, 6), min_size=1, max_size=6),
+    stocks=st.sets(st.sampled_from([6000, 9000, 10000, 12000]), min_size=1),
+    k=st.sampled_from([0, 3, 10]),
+    extra=st.lists(st.integers(0, 5), max_size=3),
+)
+def test_postprocess_never_adds_length_and_keeps_demand(
+    demand: dict[int, int], stocks: set[int], k: int, extra: list[int]
+) -> None:
+    stock_set = tuple(sorted(stocks))
+    if max(demand) > stock_set[-1]:
+        return
+    # Simulate ILP over-cutting: solve for a bigger demand, then post-process to the real one.
+    inflated = Counter(demand)
+    for i, length in zip(extra, sorted(demand), strict=False):
+        inflated[length] += i
+    start = list(GreedySolver().solve(inflated, stock_set, k).bars)
+    result = postprocess(start, demand, stock_set, k)
+    assert total_stock_mm(result) <= total_stock_mm(start)
+    assert cut_counts(result) == Counter(demand)
+    assert all(b.stock_length_mm in stock_set for b in result)
+    assert all(kerf.fits(b.lengths, b.stock_length_mm, k) for b in result)
