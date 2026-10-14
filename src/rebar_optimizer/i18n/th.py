@@ -93,6 +93,13 @@ MESSAGES: dict[IssueCode, str] = {
         "กรุณาตรวจสอบความยาวชิ้นงานหรือเพิ่มความยาวเหล็กเส้น"
     ),
     IssueCode.UNPLACED_TOO_LONG: "ยาวกว่าเหล็กเส้นที่ยาวที่สุด ({longest_stock_m} ม.)",
+    IssueCode.PATTERN_LIMIT_EXCEEDED: (
+        "Size {size}: รูปแบบการตัดมีมากกว่า {max_patterns} แบบ จึงใช้ผลจากวิธีเร็ว (GREEDY) ซึ่งอาจยังไม่ดีที่สุด"
+    ),
+    IssueCode.TIME_LIMIT_HIT: (
+        "Size {size}: คำนวณครบเวลา {seconds} วินาทีก่อนพิสูจน์ได้ว่าดีที่สุด "
+        "ผลที่ได้ใช้ได้ แต่ถ้าคำนวณใหม่อาจได้ผลต่างจากเดิมเล็กน้อย"
+    ),
     IssueCode.WEIGHT_UNKNOWN: (
         'คำนวณน้ำหนักของ Size "{size}" ไม่ได้ เพราะไม่พบตัวเลขขนาดท้ายชื่อ (เช่น DB12) จึงเว้นช่องน้ำหนักว่างไว้'
     ),

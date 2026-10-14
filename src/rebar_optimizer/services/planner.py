@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
 from collections import Counter, deque
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -36,10 +37,14 @@ from rebar_optimizer.services.summary import bar_detail
 from rebar_optimizer.solver import kerf
 from rebar_optimizer.solver.base import Demand, RawBar, total_stock_mm
 from rebar_optimizer.solver.greedy import GreedySolver
+from rebar_optimizer.solver.ilp import IlpOptions, solve_patterns
+from rebar_optimizer.solver.patterns import enumerate_patterns
 
 logger = logging.getLogger(__name__)
 
 _DIGITS = re.compile(r"(\d+)")
+MIN_ILP_TIME_S = 0.5
+"""CP-SAT always gets at least this long, even if greedy used up the budget."""
 
 
 def natural_key(text: str) -> tuple[tuple[int, int | str], ...]:
@@ -62,16 +67,16 @@ def plan(
     settings.validate()
     sizes = list(dict.fromkeys(p.size for p in pieces))
     size_plans: list[SizePlan] = []
+    issues: list[Issue] = []
     for index, size in enumerate(sizes):
         check_cancelled(cancel)
         if on_progress is not None:
             on_progress(ProgressEvent(ProgressKind.SIZE_STARTED, size, index, len(sizes)))
         size_pieces = [p for p in pieces if p.size == size]
-        size_plans.append(plan_size(size, size_pieces, settings, cancel))
+        size_plans.append(plan_size(size, size_pieces, settings, cancel, issues))
         if on_progress is not None:
             on_progress(ProgressEvent(ProgressKind.SIZE_FINISHED, size, index, len(sizes)))
 
-    issues: list[Issue] = []
     unplaced = [u for sp in size_plans for u in sp.unplaced]
     if unplaced:
         issues.append(
@@ -98,7 +103,10 @@ def plan_size(
     pieces: Sequence[Piece],
     settings: OptimizerSettings,
     cancel: CancelToken | None = None,
+    issues: list[Issue] | None = None,
 ) -> SizePlan:
+    """Plan one size. Warnings (pattern limit, time limit) go to ``issues``."""
+    issues = [] if issues is None else issues
     stocks = tuple(sorted(settings.stock_lengths_mm))
     longest_stock = stocks[-1]
     unplaced = tuple(
@@ -132,14 +140,32 @@ def plan_size(
     else:
         candidate_sets = [stocks]
 
-    best: _Solved | None = None
-    best_set: tuple[int, ...] = ()
+    # Single-length mode shares the size's time limit equally between lengths (5.1.3).
+    time_limit = settings.time_limit_s / len(candidate_sets)
+    solved_sets = []
     for stock_set in candidate_sets:
         check_cancelled(cancel)
-        solved = _solve_lengths(demand, stock_set, settings.kerf_mm, cancel)
-        if best is None or total_stock_mm(solved.bars) < total_stock_mm(best.bars):
-            best, best_set = solved, stock_set
-    assert best is not None
+        solved_sets.append(
+            (
+                _solve_lengths(
+                    size,
+                    demand,
+                    stock_set,
+                    settings=settings,
+                    time_limit_s=time_limit,
+                    cancel=cancel,
+                    issues=issues,
+                ),
+                stock_set,
+            )
+        )
+    best, best_set = min(solved_sets, key=lambda item: total_stock_mm(item[0].bars))
+    best_total = total_stock_mm(best.bars)
+    # The size's bound must hold for every candidate length, not just the chosen one.
+    lower_bound = min(solved.lower_bound_mm for solved, _ in solved_sets)
+    status = best.status
+    if status is SolveStatus.OPTIMAL and lower_bound < best_total:
+        status = SolveStatus.FEASIBLE
     logger.info(
         "size %s: %d bars, %d mm stock, status %s",
         size,
@@ -156,23 +182,74 @@ def plan_size(
         unplaced=unplaced,
         remnants=summarize_remnants(groups, settings.kerf_mm, piece_lengths),
         piece_lengths_mm=piece_lengths,
-        status=best.status,
-        lower_bound_mm=best.lower_bound_mm,
+        status=status,
+        lower_bound_mm=lower_bound,
         single_stock_mm=best_set[0] if settings.stock_mode is StockMode.SINGLE else None,
     )
 
 
 def _solve_lengths(
-    demand: Demand, stock_set: tuple[int, ...], kerf_mm: int, cancel: CancelToken | None
+    size: str,
+    demand: Demand,
+    stock_set: tuple[int, ...],
+    *,
+    settings: OptimizerSettings,
+    time_limit_s: float,
+    cancel: CancelToken | None,
+    issues: list[Issue],
 ) -> _Solved:
+    """Greedy first, then the ILP; keep the shorter total (D8).
+
+    ``time_limit_s`` covers this whole call; CP-SAT gets what is left.
+    """
+    started = time.monotonic()
+    kerf_mm = settings.kerf_mm
     greedy = GreedySolver().solve(demand, stock_set, kerf_mm, cancel)
-    bars = postprocess(greedy.bars, demand, stock_set, kerf_mm, cancel)
+    greedy_bars = postprocess(greedy.bars, demand, stock_set, kerf_mm, cancel)
+    greedy_total = total_stock_mm(greedy_bars)
     bound = simple_lower_bound(demand, stock_set, kerf_mm)
-    return _Solved(bars=bars, status=greedy.status, lower_bound_mm=bound)
+    if greedy_total <= bound:
+        logger.info("size %s: greedy meets the lower bound, ILP skipped", size)
+        return _Solved(bars=greedy_bars, status=SolveStatus.GREEDY, lower_bound_mm=bound)
+
+    pattern_set = enumerate_patterns(
+        demand, stock_set, kerf_mm, settings.max_patterns, extra_bars=greedy_bars, cancel=cancel
+    )
+    if pattern_set is None:
+        issues.append(
+            Issue.warning(
+                IssueCode.PATTERN_LIMIT_EXCEEDED, size=size, max_patterns=settings.max_patterns
+            )
+        )
+        return _Solved(bars=greedy_bars, status=SolveStatus.GREEDY, lower_bound_mm=bound)
+
+    options = IlpOptions(
+        time_limit_s=max(MIN_ILP_TIME_S, time_limit_s - (time.monotonic() - started)),
+        random_seed=settings.random_seed,
+        num_workers=settings.num_workers,
+    )
+    result = solve_patterns(demand, pattern_set, options, hint=greedy_bars, cancel=cancel)
+    if result is None:
+        issues.append(Issue.warning(IssueCode.TIME_LIMIT_HIT, size=size, seconds=time_limit_s))
+        return _Solved(bars=greedy_bars, status=SolveStatus.GREEDY, lower_bound_mm=bound)
+
+    if result.lower_bound_mm is not None:
+        bound = max(bound, result.lower_bound_mm)
+    ilp_bars = postprocess(result.bars, demand, stock_set, kerf_mm, cancel)
+    ilp_total = total_stock_mm(ilp_bars)
+    status = result.status
+    if ilp_total <= bound:
+        # Post-processing (removing over-cuts, downsizing) reached the proven bound.
+        status = SolveStatus.OPTIMAL
+    if status is SolveStatus.FEASIBLE:
+        issues.append(Issue.warning(IssueCode.TIME_LIMIT_HIT, size=size, seconds=time_limit_s))
+    if ilp_total <= greedy_total:
+        return _Solved(bars=ilp_bars, status=status, lower_bound_mm=bound)
+    return _Solved(bars=greedy_bars, status=SolveStatus.GREEDY, lower_bound_mm=bound)
 
 
 def simple_lower_bound(demand: Demand, stock_set: Sequence[int], kerf_mm: int) -> int:
-    """A cheap valid bound until the ILP provides a better one (phase 4).
+    """A cheap valid bound, used when the ILP is skipped or gives a weaker one.
 
     Total stock is at least the total piece length. With a single stock
     length ``S`` at least ``ceil(sum(l + k) / (S + k))`` bars are needed.
