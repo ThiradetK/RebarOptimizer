@@ -18,6 +18,18 @@ SEVERITY_LABELS: dict[Severity, str] = {
     Severity.WARNING: "คำเตือน",
 }
 
+STATUS_LABELS: dict[str, str] = {
+    "OPTIMAL": "OPTIMAL (ดีที่สุดแล้ว)",
+    "FEASIBLE": "FEASIBLE (ดี แต่หมดเวลาก่อนพิสูจน์ว่าดีที่สุด)",
+    "HEURISTIC": "HEURISTIC (ใกล้เคียงดีที่สุด)",
+    "GREEDY": "GREEDY (วิธีเร็ว)",
+}
+
+STOCK_MODE_LABELS: dict[str, str] = {
+    "mixed": "ผสมความยาวได้",
+    "single": "บังคับความยาวเดียว",
+}
+
 MESSAGES: dict[IssueCode, str] = {
     # reader: file level
     IssueCode.FILE_NOT_FOUND: "ไม่พบไฟล์ {path} กรุณาตรวจสอบว่าเลือกไฟล์ถูกต้อง",
@@ -75,6 +87,12 @@ MESSAGES: dict[IssueCode, str] = {
     IssueCode.TIME_LIMIT_NOT_POSITIVE: "เวลาคำนวณสูงสุดต้องมากกว่า 0 วินาที (พบ {value})",
     IssueCode.MAX_PATTERNS_NOT_POSITIVE: "จำนวน pattern สูงสุดต้องมากกว่า 0 (พบ {value})",
     IssueCode.NUM_WORKERS_NOT_POSITIVE: "จำนวน thread ต้องมากกว่า 0 (พบ {value})",
+    # planning
+    IssueCode.PIECES_UNPLACED: (
+        "มีชิ้นงาน {count} ชิ้นที่วางไม่ได้ เพราะยาวกว่าเหล็กเส้นที่ยาวที่สุด (No {nos}) "
+        "กรุณาตรวจสอบความยาวชิ้นงานหรือเพิ่มความยาวเหล็กเส้น"
+    ),
+    IssueCode.UNPLACED_TOO_LONG: "ยาวกว่าเหล็กเส้นที่ยาวที่สุด ({longest_stock_m} ม.)",
     # output
     IssueCode.OUTPUT_LOCKED: ("บันทึกไฟล์ไม่ได้ เพราะไฟล์ {name} เปิดค้างอยู่ กรุณาปิดไฟล์ {name} แล้วลองใหม่"),
     IssueCode.OUTPUT_FAILED: "บันทึกไฟล์ {path} ไม่ได้: {reason}",
@@ -129,3 +147,49 @@ def format_issues(issues: Iterable[Issue]) -> list[str]:
     """Errors first, then warnings, each with a severity prefix."""
     ordered = sorted(issues, key=lambda i: 0 if i.is_error else 1)
     return [format_issue_with_severity(i) for i in ordered]
+
+
+# --- CLI text ---------------------------------------------------------------------
+
+CLI_TEXT: dict[str, str] = {
+    "description": "วางแผนตัดเหล็กเส้นให้คุ้มที่สุด",
+    "help_input": "ไฟล์ Excel รายการชิ้นงาน (.xlsx)",
+    "help_stock": "ความยาวเหล็กเส้นที่มีขาย หน่วยเมตร คั่นด้วยจุลภาค เช่น 10,12",
+    "help_kerf": "ความกว้างใบตัด (มม.) ค่าเริ่มต้น 0",
+    "help_single": "บังคับใช้ความยาวเหล็กเส้นเดียวต่อ Size",
+    "help_time_limit": "เวลาคำนวณสูงสุดต่อ Size (วินาที)",
+    "help_template": "สร้างไฟล์ input ตัวอย่างแล้วจบ",
+    "help_selftest": "แก้โจทย์ตัวอย่างในตัวเพื่อตรวจว่าโปรแกรมทำงานได้",
+    "need_input": "กรุณาระบุไฟล์ input และ --stock",
+    "template_written": "สร้างไฟล์ตัวอย่างแล้ว: {path}",
+    "progress": "[{index}/{total}] กำลังคำนวณ Size {size} ...",
+    "size_header": "Size {size} — สถานะ {status}",
+    "single_stock": "  ความยาวเหล็กเส้นที่เลือก: {stock_m} ม.",
+    "stock_count": "  สั่งซื้อ: {items}",
+    "stock_item": "{stock_m} ม. × {count} เส้น",
+    "totals": (
+        "  เหล็กรวม {stock_m} ม. | ชิ้นงานรวม {pieces_m} ม. | เศษใช้ต่อได้ {reusable_m} ม. | "
+        "Waste {waste_m} ม. | kerf {kerf_m} ม. | ใช้ประโยชน์ {utilization:.1f}%"
+    ),
+    "bound": "  lower bound {bound_m} ม. | gap {gap:.1f}%",
+    "pattern": "  แบบที่ {index}: {stock_m} ม. × {count} เส้น → {cuts} | เศษ {remnant_m} ม.{tag}",
+    "reusable_tag": " (ใช้ต่อได้ ตัด {longest_m} ม. ได้)",
+    "unplaced_header": "ชิ้นงานที่วางไม่ได้:",
+    "unplaced_item": "  Size {size} No {no} ยาว {length_m} ม. × {quantity} ชิ้น — {reason}",
+    "grand_total": "รวมทุก Size: เหล็ก {bars} เส้น ยาวรวม {stock_m} ม.",
+    "warnings_header": "คำเตือน:",
+    "errors_header": "พบปัญหา:",
+    "cancelled": "ยกเลิกการคำนวณแล้ว",
+    "unexpected": "เกิดข้อผิดพลาดที่ไม่คาดคิด รายละเอียดอยู่ในไฟล์ log: {log_path}",
+    "selftest_ok": "selftest ผ่าน",
+    "selftest_failed": "selftest ไม่ผ่าน รายละเอียดอยู่ในไฟล์ log: {log_path}",
+}
+
+
+def format_cuts(cuts: Iterable[tuple[str, int, int]]) -> str:
+    """``[("5", 3500, 2), ("8", 2100, 1)]`` -> ``"No.5=3.500 x 2, No.8=2.100"``."""
+    parts = []
+    for no, length_mm, count in cuts:
+        text = f"No.{no}={format_metres(length_mm)}"
+        parts.append(text if count == 1 else f"{text} x {count}")
+    return ", ".join(parts)
