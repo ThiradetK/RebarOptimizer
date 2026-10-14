@@ -10,6 +10,8 @@ from openpyxl.styles import Font
 from rebar_optimizer.domain.errors import Issue, IssueCode, OutputWriteError
 
 TEMPLATE_HEADERS = ("Size", "No", "Length", "Quantity")
+INVENTORY_SHEET = "Stock"
+INVENTORY_HEADERS = ("Size", "Length", "Quantity")
 
 SAMPLE_ROWS: tuple[tuple[str, str, float, int], ...] = (
     ("DB12", "1", 3.5, 12),
@@ -32,6 +34,11 @@ INSTRUCTIONS: tuple[str, ...] = (
     "5. Quantity = จำนวนชิ้น เป็นจำนวนเต็ม",
     "6. ใช้หัวตารางภาษาไทยได้: ขนาด, หมายเลข, ความยาว, จำนวน",
     "7. คอลัมน์อื่นที่เพิ่มมา (เช่น หมายเหตุ) จะถูกคัดลอกไปยังผลลัพธ์ แต่ไม่ใช้คำนวณ",
+    "",
+    "เหล็กคงคลัง / เศษจากงานก่อน (ไม่บังคับ)",
+    "8. ถ้ามีเหล็กเส้นหรือเศษเหลืออยู่แล้ว ให้กรอกในชีต Stock: Size, Length (เมตร), Quantity (จำนวนเส้น)",
+    "9. โปรแกรมจะใช้เหล็กคงคลังก่อนเพื่อให้ซื้อใหม่น้อยที่สุด และแยกรายการที่ใช้ไว้ในชีต ใช้จากคงคลัง",
+    "10. ถ้าไม่มีเหล็กคงคลัง ปล่อยชีต Stock ว่างไว้หรือลบทิ้งได้",
 )
 
 
@@ -52,6 +59,14 @@ def write_template(path: str | Path) -> Path:
     for column, width in zip("ABCD", (10, 10, 12, 12), strict=True):
         sheet.column_dimensions[column].width = width
     sheet.freeze_panes = "A2"
+
+    stock = workbook.create_sheet(INVENTORY_SHEET)
+    stock.append(INVENTORY_HEADERS)
+    for cell in stock[1]:
+        cell.font = Font(bold=True)
+    for column, width in zip("ABC", (10, 12, 12), strict=True):
+        stock.column_dimensions[column].width = width
+    stock.freeze_panes = "A2"
 
     notes = workbook.create_sheet("คำอธิบาย")
     for line in INSTRUCTIONS:

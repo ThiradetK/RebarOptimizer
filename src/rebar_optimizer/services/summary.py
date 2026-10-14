@@ -6,7 +6,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from rebar_optimizer.domain.models import BarGroup, Cut, CuttingPlan, SizePlan
+from rebar_optimizer.domain.models import BarGroup, Cut, CuttingPlan, SizePlan, StockSource
 from rebar_optimizer.domain.weights import unit_weight_kg_per_m
 from rebar_optimizer.services.postprocess import classify_remnant
 from rebar_optimizer.solver import kerf
@@ -27,9 +27,15 @@ class BarDetail:
 class SizeSummary:
     size: str
     bars_by_stock: dict[int, int]
-    """``{stock_length_mm: bar count}``, shortest first."""
+    """New (purchased) bars: ``{stock_length_mm: bar count}``, shortest first."""
+    inventory_by_stock: dict[int, int]
+    """Inventory bars used: ``{stock_length_mm: bar count}``, shortest first."""
     bar_count: int
+    """All bars, purchased and from inventory."""
     stock_mm: int
+    """All stock cut, purchased and from inventory."""
+    new_stock_mm: int
+    inventory_mm: int
     pieces_mm: int
     reusable_mm: int
     waste_mm: int
@@ -50,11 +56,15 @@ def bar_detail(group: BarGroup, kerf_mm: int, piece_lengths_mm: tuple[int, ...])
 
 def summarize_size(plan: SizePlan) -> SizeSummary:
     by_stock: Counter[int] = Counter()
+    by_inventory: Counter[int] = Counter()
     stock = pieces = reusable = waste = kerf_total = piece_count = 0
     for group in plan.groups:
         detail = bar_detail(group, plan.kerf_mm, plan.piece_lengths_mm)
         n = group.count
-        by_stock[group.bar.stock_length_mm] += n
+        if group.bar.source is StockSource.INVENTORY:
+            by_inventory[group.bar.stock_length_mm] += n
+        else:
+            by_stock[group.bar.stock_length_mm] += n
         stock += detail.usage.stock_length_mm * n
         pieces += detail.usage.pieces_mm * n
         kerf_total += detail.usage.kerf_loss_mm * n
@@ -66,8 +76,11 @@ def summarize_size(plan: SizePlan) -> SizeSummary:
     return SizeSummary(
         size=plan.size,
         bars_by_stock=dict(sorted(by_stock.items())),
-        bar_count=sum(by_stock.values()),
+        inventory_by_stock=dict(sorted(by_inventory.items())),
+        bar_count=sum(by_stock.values()) + sum(by_inventory.values()),
         stock_mm=stock,
+        new_stock_mm=sum(length * n for length, n in by_stock.items()),
+        inventory_mm=sum(length * n for length, n in by_inventory.items()),
         pieces_mm=pieces,
         reusable_mm=reusable,
         waste_mm=waste,
@@ -93,12 +106,14 @@ class PlanTotals:
 
     bar_count: int
     stock_mm: int
+    new_stock_mm: int
+    inventory_mm: int
     pieces_mm: int
     reusable_mm: int
     waste_mm: int
     kerf_mm: int
     weight_kg: float | None
-    """Purchase weight of the sizes whose weight is known; ``None`` if none is."""
+    """Purchase (new stock) weight of the sizes whose weight is known; ``None`` if none is."""
     sizes_without_weight: tuple[str, ...]
 
     @property
@@ -109,10 +124,12 @@ class PlanTotals:
 def plan_totals(plan: CuttingPlan) -> PlanTotals:
     summaries = [summarize_size(sp) for sp in plan.sizes]
     weights = [(s, unit_weight_kg_per_m(s.size)) for s in summaries if s.bar_count]
-    known = [s.stock_mm / 1000 * w for s, w in weights if w is not None]
+    known = [s.new_stock_mm / 1000 * w for s, w in weights if w is not None]
     return PlanTotals(
         bar_count=sum(s.bar_count for s in summaries),
         stock_mm=sum(s.stock_mm for s in summaries),
+        new_stock_mm=sum(s.new_stock_mm for s in summaries),
+        inventory_mm=sum(s.inventory_mm for s in summaries),
         pieces_mm=sum(s.pieces_mm for s in summaries),
         reusable_mm=sum(s.reusable_mm for s in summaries),
         waste_mm=sum(s.waste_mm for s in summaries),

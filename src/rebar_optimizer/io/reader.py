@@ -2,6 +2,11 @@
 
 openpyxl is used directly (no pandas) so that Excel row numbers and cell types
 stay under our control. Every problem is collected before reporting (6.1).
+
+Pieces come from the first sheet that is not the optional inventory sheet
+(phase 8). That sheet, named ``Stock`` (or ``คงคลัง`` / ``เหล็กคงคลัง``), lists
+bars already on hand: ``Size``, ``Length`` (m), ``Quantity``. Its issues carry
+a ``sheet`` parameter so messages say which sheet they refer to.
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ import openpyxl
 from openpyxl.utils.exceptions import InvalidFileException
 
 from rebar_optimizer.domain.errors import InputValidationError, Issue, IssueCode
-from rebar_optimizer.domain.models import Piece
+from rebar_optimizer.domain.models import InventoryStock, Piece
 
 HEADER_ROW = 1
 SUB_MM_TOLERANCE = 0.01
@@ -36,6 +41,11 @@ class Column(StrEnum):
     LENGTH = "Length"
     QUANTITY = "Quantity"
 
+
+PIECE_COLUMNS = (Column.SIZE, Column.NO, Column.LENGTH, Column.QUANTITY)
+INVENTORY_COLUMNS = (Column.SIZE, Column.LENGTH, Column.QUANTITY)
+INVENTORY_SHEET_NAMES = ("stock", "คงคลัง", "เหล็กคงคลัง")
+"""Names (case-insensitive) that mark the optional inventory sheet."""
 
 COLUMN_ALIASES: dict[str, Column] = {
     "size": Column.SIZE,
@@ -64,6 +74,17 @@ class ReadResult:
     pieces: tuple[Piece, ...]
     warnings: tuple[Issue, ...]
     table: InputTable
+    inventory: tuple[InventoryStock, ...] = ()
+    """Bars on hand from the inventory sheet; empty without one."""
+    inventory_sheet: str | None = None
+    """Title of the inventory sheet, if the workbook has one."""
+
+
+@dataclass(frozen=True)
+class _Sheets:
+    pieces: list[tuple[object, ...]]
+    inventory: list[tuple[object, ...]] | None
+    inventory_title: str | None
 
 
 @dataclass(frozen=True)
@@ -87,20 +108,45 @@ def read_pieces(path: str | Path) -> ReadResult:
         raise InputValidationError(
             [Issue.error(IssueCode.FILE_NOT_XLSX, path=str(path), suffix=path.suffix)]
         )
-    raw_rows = _load_rows(path)
+    sheets = _load_sheets(path)
     issues: list[Issue] = []
-    table, records = _parse_sheet(raw_rows, issues)
+    table, records = _parse_sheet(sheets.pieces, issues)
     pieces = _merge_duplicates(records, issues)
     issues.extend(_cross_row_warnings(records))
+    inventory: list[InventoryStock] = []
+    if sheets.inventory is not None and sheets.inventory_title is not None:
+        sheet_issues: list[Issue] = []
+        inventory = _parse_inventory(sheets.inventory, sheet_issues)
+        issues.extend(_in_sheet(i, sheets.inventory_title) for i in sheet_issues)
+        unused = list(
+            dict.fromkeys(i.size for i in inventory if i.size not in {p.size for p in pieces})
+        )
+        if unused and pieces:
+            issues.append(
+                Issue.warning(
+                    IssueCode.INVENTORY_SIZE_UNUSED, sizes=unused, sheet=sheets.inventory_title
+                )
+            )
 
     errors = [i for i in issues if i.is_error]
     warnings = [i for i in issues if not i.is_error]
     if errors:
         raise InputValidationError(errors + warnings)
-    return ReadResult(path=path, pieces=tuple(pieces), warnings=tuple(warnings), table=table)
+    return ReadResult(
+        path=path,
+        pieces=tuple(pieces),
+        warnings=tuple(warnings),
+        table=table,
+        inventory=tuple(inventory),
+        inventory_sheet=sheets.inventory_title,
+    )
 
 
-def _load_rows(path: Path) -> list[tuple[object, ...]]:
+def is_inventory_sheet(title: str) -> bool:
+    return title.strip().casefold() in INVENTORY_SHEET_NAMES
+
+
+def _load_sheets(path: Path) -> _Sheets:
     try:
         workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
     except PermissionError as exc:
@@ -108,13 +154,27 @@ def _load_rows(path: Path) -> list[tuple[object, ...]]:
     except (InvalidFileException, zipfile.BadZipFile, KeyError, ValueError, OSError) as exc:
         raise InputValidationError([Issue.error(IssueCode.FILE_INVALID, path=str(path))]) from exc
     try:
-        if not workbook.worksheets:
-            return []
-        return [tuple(row) for row in workbook.worksheets[0].iter_rows(values_only=True)]
+        piece_sheets = [ws for ws in workbook.worksheets if not is_inventory_sheet(ws.title)]
+        inventory_sheets = [ws for ws in workbook.worksheets if is_inventory_sheet(ws.title)]
+        pieces = (
+            [tuple(row) for row in piece_sheets[0].iter_rows(values_only=True)]
+            if piece_sheets
+            else []
+        )
+        if not inventory_sheets:
+            return _Sheets(pieces=pieces, inventory=None, inventory_title=None)
+        inventory = [tuple(row) for row in inventory_sheets[0].iter_rows(values_only=True)]
+        return _Sheets(
+            pieces=pieces, inventory=inventory, inventory_title=inventory_sheets[0].title
+        )
     except (KeyError, ValueError, OSError, zipfile.BadZipFile) as exc:
         raise InputValidationError([Issue.error(IssueCode.FILE_INVALID, path=str(path))]) from exc
     finally:
         workbook.close()
+
+
+def _in_sheet(issue: Issue, sheet: str) -> Issue:
+    return Issue(issue.code, issue.severity, {**issue.params, "sheet": sheet})
 
 
 def _parse_sheet(
@@ -156,19 +216,24 @@ def _numbered_rows(
         yield HEADER_ROW + 1 + offset, raw
 
 
-def _locate_columns(headers: Sequence[str], issues: list[Issue]) -> dict[Column, int] | None:
+def _locate_columns(
+    headers: Sequence[str],
+    issues: list[Issue],
+    required: Sequence[Column] = PIECE_COLUMNS,
+    missing_code: IssueCode = IssueCode.MISSING_COLUMNS,
+) -> dict[Column, int] | None:
     found: dict[Column, int] = {}
     for index, header in enumerate(headers):
         column = COLUMN_ALIASES.get(header.casefold())
-        if column is None:
+        if column is None or column not in required:
             continue
         if column in found:
             issues.append(Issue.error(IssueCode.DUPLICATE_COLUMN, column=str(column)))
             continue
         found[column] = index
-    missing = [str(c) for c in Column if c not in found]
+    missing = [str(c) for c in required if c not in found]
     if missing:
-        issues.append(Issue.error(IssueCode.MISSING_COLUMNS, columns=missing))
+        issues.append(Issue.error(missing_code, columns=missing))
         return None
     return found
 
@@ -190,6 +255,48 @@ def _parse_row(
     if size is None or no is None or length_mm is None or quantity is None:
         return None
     return _Record(row=row, size=size, no=no, length_mm=length_mm, quantity=quantity)
+
+
+def _parse_inventory(
+    raw_rows: Sequence[tuple[object, ...]], issues: list[Issue]
+) -> list[InventoryStock]:
+    """The inventory sheet; an empty sheet (or headers only) means no inventory.
+
+    Rows of the same size and length are merged.
+    """
+    if not raw_rows or _is_blank_row(raw_rows[0]):
+        return []
+    headers = tuple("" if v is None else str(v).strip() for v in raw_rows[0])
+    columns = _locate_columns(
+        headers, issues, INVENTORY_COLUMNS, IssueCode.INVENTORY_MISSING_COLUMNS
+    )
+    if columns is None:
+        return []
+    merged: dict[tuple[str, int], InventoryStock] = {}
+    for row_number, raw in _numbered_rows(raw_rows):
+        if _is_blank_row(raw):
+            continue
+        values = tuple(raw) + (None,) * max(0, len(headers) - len(raw))
+        cells = {column: values[index] for column, index in columns.items()}
+        blanks = [column for column, value in cells.items() if _is_blank(value)]
+        for column in blanks:
+            issues.append(Issue.error(IssueCode.EMPTY_VALUE, row=row_number, column=str(column)))
+        if blanks:
+            continue
+        size = _parse_size(row_number, cells[Column.SIZE], issues)
+        length_mm = _parse_length(row_number, cells[Column.LENGTH], issues)
+        quantity = _parse_quantity(row_number, cells[Column.QUANTITY], issues)
+        if size is None or length_mm is None or quantity is None:
+            continue
+        key = (size, length_mm)
+        previous = merged.get(key)
+        merged[key] = InventoryStock(
+            size=size,
+            length_mm=length_mm,
+            quantity=quantity + (previous.quantity if previous else 0),
+            rows=(*previous.rows, row_number) if previous else (row_number,),
+        )
+    return list(merged.values())
 
 
 # --- cell parsing ---------------------------------------------------------------

@@ -15,7 +15,7 @@ from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QRect, QRectF, QSize, Q
 from PySide6.QtGui import QBrush, QColor, QHelpEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QToolTip, QWidget
 
-from rebar_optimizer.domain.models import SizePlan
+from rebar_optimizer.domain.models import SizePlan, StockSource
 from rebar_optimizer.i18n.th import GUI_TEXT, format_metres
 from rebar_optimizer.services.planner import natural_key
 from rebar_optimizer.services.summary import bar_detail
@@ -58,6 +58,8 @@ class Row:
     count: int
     stock_mm: int
     segments: tuple[Segment, ...]
+    inventory: bool = False
+    """The bar comes from inventory (phase 8), not purchased."""
 
 
 def build_rows(plan: SizePlan) -> list[Row]:
@@ -95,8 +97,20 @@ def build_rows(plan: SizePlan) -> list[Row]:
                     longest_cuttable_mm=detail.longest_cuttable_mm or 0,
                 )
             )
-        rows.append(Row(group.count, group.bar.stock_length_mm, tuple(segments)))
+        rows.append(
+            Row(
+                group.count,
+                group.bar.stock_length_mm,
+                tuple(segments),
+                inventory=group.bar.source is StockSource.INVENTORY,
+            )
+        )
     return rows
+
+
+def stock_label(row: Row) -> str:
+    key = "preview_stock_inventory" if row.inventory else "preview_stock"
+    return GUI_TEXT[key].format(stock_m=format_metres(row.stock_mm))
 
 
 # Distinct, non-green hues (green means a reusable remnant): light / dark variants.
@@ -146,6 +160,7 @@ class PlanPreview(QWidget):
         self._colors: dict[str, QColor] = {}
         self._max_stock = 1
         self._grow = 1.0
+        self._right_label = RIGHT_LABEL
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
         self.setMinimumWidth(LEFT_LABEL + RIGHT_LABEL + 120)
 
@@ -158,6 +173,11 @@ class PlanPreview(QWidget):
         )
         stocks = [row.stock_mm for row in self._rows]
         self._max_stock = max_stock_mm or (max(stocks) if stocks else 1)
+        # Inventory labels ("7.300 ม. คงคลัง") are wider than the plain length.
+        metrics = self.fontMetrics()
+        self._right_label = max(
+            [RIGHT_LABEL] + [metrics.horizontalAdvance(stock_label(row)) + 4 for row in self._rows]
+        )
         self.updateGeometry()
         self.setMinimumHeight(self.sizeHint().height())
         animations.drive(self, "grow", GROW_TOTAL_MS, self._set_grow)
@@ -186,7 +206,7 @@ class PlanPreview(QWidget):
         return LEFT_LABEL + GAP
 
     def _px_per_mm(self) -> float:
-        width = self.width() - LEFT_LABEL - RIGHT_LABEL - 2 * GAP
+        width = self.width() - LEFT_LABEL - self._right_label - 2 * GAP
         return max(width, 10) / self._max_stock
 
     def _row_fraction(self, index: int) -> float:
@@ -274,9 +294,9 @@ class PlanPreview(QWidget):
             painter.restore()
             painter.setPen(text_pen)
             painter.drawText(
-                QRect(int(left + full_width) + GAP, y, RIGHT_LABEL, ROW_HEIGHT),
+                QRect(int(left + full_width) + GAP, y, self._right_label, ROW_HEIGHT),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                GUI_TEXT["preview_stock"].format(stock_m=format_metres(row.stock_mm)),
+                stock_label(row),
             )
 
     # --- tooltip ---------------------------------------------------------------------

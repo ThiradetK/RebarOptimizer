@@ -22,7 +22,7 @@ from rebar_optimizer.domain.errors import (
     OutputWriteError,
     SettingsError,
 )
-from rebar_optimizer.domain.models import CuttingPlan, Piece
+from rebar_optimizer.domain.models import CuttingPlan, InventoryStock, Piece, StockSource
 from rebar_optimizer.domain.settings import OptimizerSettings, StockMode, parse_stock_lengths_m
 from rebar_optimizer.i18n import th
 from rebar_optimizer.i18n.th import CLI_TEXT, format_metres
@@ -109,7 +109,9 @@ def _run(args: argparse.Namespace, log_path: Path) -> int:
     if result.warnings:
         _print_issues(CLI_TEXT["warnings_header"], result.warnings)
 
-    cutting_plan = planner.plan(result.pieces, settings, on_progress=_print_progress)
+    cutting_plan = planner.plan(
+        result.pieces, settings, on_progress=_print_progress, inventory=result.inventory
+    )
     for line in format_plan(cutting_plan):
         print(line)
     if args.output is not None:
@@ -118,6 +120,8 @@ def _run(args: argparse.Namespace, log_path: Path) -> int:
             table=result.table,
             input_path=result.path,
             warnings=result.warnings,
+            inventory=result.inventory,
+            inventory_sheet=result.inventory_sheet,
         )
         written = write_plan(args.output, cutting_plan, source)
         print(CLI_TEXT["output_written"].format(path=written))
@@ -127,13 +131,14 @@ def _run(args: argparse.Namespace, log_path: Path) -> int:
 def format_plan(plan: CuttingPlan) -> list[str]:
     """Human-readable Thai summary of ``plan``, one line per item."""
     lines: list[str] = []
-    total_bars = total_stock = 0
+    total_bars = total_stock = total_inventory = 0
     for size_plan in plan.sizes:
         if not size_plan.groups:
             continue
         summary = summarize_size(size_plan)
         total_bars += summary.bar_count
         total_stock += summary.stock_mm
+        total_inventory += summary.inventory_mm
         lines.append("")
         lines.append(
             CLI_TEXT["size_header"].format(
@@ -148,7 +153,13 @@ def format_plan(plan: CuttingPlan) -> list[str]:
             CLI_TEXT["stock_item"].format(stock_m=format_metres(stock), count=count)
             for stock, count in summary.bars_by_stock.items()
         )
-        lines.append(CLI_TEXT["stock_count"].format(items=items))
+        lines.append(CLI_TEXT["stock_count"].format(items=items or th.NONE_TEXT))
+        if summary.inventory_by_stock:
+            used = ", ".join(
+                CLI_TEXT["stock_item"].format(stock_m=format_metres(stock), count=count)
+                for stock, count in summary.inventory_by_stock.items()
+            )
+            lines.append(CLI_TEXT["inventory_count"].format(items=used))
         lines.append(
             CLI_TEXT["totals"].format(
                 stock_m=format_metres(summary.stock_mm),
@@ -175,7 +186,8 @@ def format_plan(plan: CuttingPlan) -> list[str]:
             lines.append(
                 CLI_TEXT["pattern"].format(
                     index=index,
-                    stock_m=format_metres(group.bar.stock_length_mm),
+                    stock_m=format_metres(group.bar.stock_length_mm)
+                    + (th.INVENTORY_TAG if group.bar.source is StockSource.INVENTORY else ""),
                     count=group.count,
                     cuts=th.format_cuts(cut_runs(group.bar.cuts)),
                     remnant_m=format_metres(detail.usage.remnant_mm),
@@ -186,6 +198,13 @@ def format_plan(plan: CuttingPlan) -> list[str]:
     lines.append(
         CLI_TEXT["grand_total"].format(bars=total_bars, stock_m=format_metres(total_stock))
     )
+    if total_inventory:
+        lines.append(
+            CLI_TEXT["grand_total_split"].format(
+                new_m=format_metres(total_stock - total_inventory),
+                inventory_m=format_metres(total_inventory),
+            )
+        )
     if plan.unplaced:
         lines.append("")
         lines.append(CLI_TEXT["unplaced_header"])
@@ -239,6 +258,9 @@ SELFTEST_PIECES: tuple[Piece, ...] = (
 )
 
 
+SELFTEST_INVENTORY: tuple[InventoryStock, ...] = (InventoryStock("DB16", 7000, 2, (2,)),)
+
+
 def run_selftest(log_path: Path) -> int:
     """Solve a built-in problem in every mode; ``verify_plan`` runs inside ``plan``."""
     try:
@@ -253,6 +275,9 @@ def run_selftest(log_path: Path) -> int:
                 result = planner.plan(SELFTEST_PIECES, settings)
                 if len(result.unplaced) != 1:
                     raise AssertionError("the 12.5 m piece must be reported as unplaced")
+                stocked = planner.plan(SELFTEST_PIECES, settings, inventory=SELFTEST_INVENTORY)
+                if stocked.sizes[1].inventory_stock_mm == 0:
+                    raise AssertionError("the 7 m inventory bars of DB16 must be used")
     except Exception:
         logger.exception("selftest failed")
         print(CLI_TEXT["selftest_failed"].format(log_path=log_path), file=sys.stderr)

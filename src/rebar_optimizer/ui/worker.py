@@ -61,7 +61,11 @@ class PlanWorker(QObject):
             self._token.raise_if_cancelled()
             source = read_pieces(self._input_path)
             plan = planner.plan(
-                source.pieces, self._settings, on_progress=self._emit_progress, cancel=self._token
+                source.pieces,
+                self._settings,
+                on_progress=self._emit_progress,
+                cancel=self._token,
+                inventory=source.inventory,
             )
             self.succeeded.emit(PlanOutcome(plan=plan, source=source))
         except (InputValidationError, SettingsError) as exc:
