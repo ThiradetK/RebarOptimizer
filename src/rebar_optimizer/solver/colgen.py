@@ -32,6 +32,7 @@ from rebar_optimizer.domain.models import SolveStatus, StockSource
 from rebar_optimizer.services.cancel import CancelToken, check_cancelled
 from rebar_optimizer.solver import kerf
 from rebar_optimizer.solver.base import NO_INVENTORY, Demand, Inventory, RawBar, SolveResult
+from rebar_optimizer.solver.greedy import GreedySolver
 from rebar_optimizer.solver.ilp import IlpOptions, solve_patterns
 from rebar_optimizer.solver.patterns import Pattern, PatternSet, pattern_of
 
@@ -188,6 +189,13 @@ def solve_colgen(
     started = time.monotonic()
     lengths = tuple(sorted(demand, reverse=True))
     inventory = {s: n for s, n in inventory.items() if n > 0}
+    if not initial_bars:
+        # 5.5 step 1 starts from the greedy patterns; the planner passes them in.
+        initial_bars = (
+            GreedySolver()
+            .solve(demand, tuple(stock_lengths_mm), kerf_mm, cancel, inventory=inventory)
+            .bars
+        )
     new_stocks = sorted(stock_lengths_mm)
     stocks = sorted(set(new_stocks) | set(inventory))
     master = _MasterLp(lengths, demand)
