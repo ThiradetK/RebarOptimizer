@@ -3,23 +3,72 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  test:
+  test-and-build:
     runs-on: windows-latest
+    timeout-minutes: 45
     env:
       QT_QPA_PLATFORM: offscreen
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           cache: pip
+          cache-dependency-path: pyproject.toml
+
       - name: Install
         run: python -m pip install -e .[dev]
+
       - name: Ruff
-        run: ruff check
+        run: |
+          ruff check
+          ruff format --check src tests benchmarks packaging
+
       - name: Mypy
         run: mypy
-      - name: Pytest
+
+      - name: Pytest (including offscreen GUI tests)
         run: pytest
+
+      - name: Build (PyInstaller onedir)
+        run: pyinstaller --noconfirm --clean packaging/rebar_optimizer.spec
+
+      - name: Self-test the built exe
+        shell: pwsh
+        run: |
+          $exe = "dist/RebarOptimizer/RebarOptimizer.exe"
+          $env:REBAR_OPTIMIZER_LOG_DIR = "$PWD/exe-logs"
+          $p = Start-Process -FilePath $exe -ArgumentList "--selftest" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Get-Content "$env:REBAR_OPTIMIZER_LOG_DIR/rebar_optimizer.log" -ErrorAction SilentlyContinue
+            throw "selftest failed with exit code $($p.ExitCode)"
+          }
+          $env:REBAR_OPTIMIZER_STARTUP_CHECK = "1"
+          $env:REBAR_OPTIMIZER_SETTINGS = "$PWD/exe-settings.json"
+          $p = Start-Process -FilePath $exe -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "GUI startup check failed with exit code $($p.ExitCode)" }
+          $startup = Select-String -Path "$env:REBAR_OPTIMIZER_LOG_DIR/rebar_optimizer.log" -Pattern "main window shown after" | Select-Object -Last 1
+          "Startup: $($startup.Line)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Zip
+        id: zip
+        shell: pwsh
+        run: |
+          $version = python -c "import rebar_optimizer; print(rebar_optimizer.__version__)"
+          $zip = "RebarOptimizer-$version-win64.zip"
+          Compress-Archive -Path dist/RebarOptimizer -DestinationPath $zip -CompressionLevel Optimal
+          $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
+          "Zip: $zip ($mb MB)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($mb -gt 200) { throw "zip is larger than 200 MB" }
+          "name=$zip" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RebarOptimizer-win64
+          path: ${{ steps.zip.outputs.name }}
+          if-no-files-found: error

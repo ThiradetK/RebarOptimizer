@@ -1,6 +1,6 @@
 """Synthetic benchmark datasets with fixed seeds.
 
-    python -m benchmarks.generate medium out.xlsx
+python -m benchmarks.generate medium out.xlsx
 """
 
 from __future__ import annotations

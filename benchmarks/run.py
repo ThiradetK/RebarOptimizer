@@ -1,6 +1,6 @@
 """Compare greedy with the full planner (greedy + ILP) on synthetic data.
 
-    python -m benchmarks.run medium --time-limit 30
+python -m benchmarks.run medium --time-limit 30
 """
 
 from __future__ import annotations
