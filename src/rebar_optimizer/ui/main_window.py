@@ -647,9 +647,12 @@ class MainWindow(QMainWindow):
         plan = outcome.plan
         totals = plan_totals(plan)
         values = self.metric_values
-        values["total_stock"].setText(
-            GUI_TEXT["metres"].format(value=format_metres(totals.stock_mm))
-        )
+        stock_text = GUI_TEXT["metres"].format(value=format_metres(totals.stock_mm))
+        if totals.inventory_mm:
+            stock_text += "\n" + GUI_TEXT["from_inventory"].format(
+                value=format_metres(totals.inventory_mm)
+            )
+        values["total_stock"].setText(stock_text)
         values["total_weight"].setText(
             GUI_TEXT["kg"].format(value=totals.weight_kg)
             if totals.weight_kg is not None
@@ -751,7 +754,14 @@ class MainWindow(QMainWindow):
             written = write_plan(
                 path,
                 self._outcome.plan,
-                WriteSource(source.pieces, source.table, source.path, source.warnings),
+                WriteSource(
+                    source.pieces,
+                    source.table,
+                    source.path,
+                    source.warnings,
+                    inventory=source.inventory,
+                    inventory_sheet=source.inventory_sheet,
+                ),
             )
         except OutputWriteError as exc:
             self._show_issues(GUI_TEXT["error_output_header"], exc.issues)

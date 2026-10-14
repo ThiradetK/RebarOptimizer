@@ -76,6 +76,15 @@ MESSAGES: dict[IssueCode, str] = {
     IssueCode.DUP_NO_MERGED: (
         "No {no} (Size {size}) ซ้ำกันที่แถว {rows} และความยาวเท่ากัน จึงรวมจำนวนเป็น {quantity} ชิ้น"
     ),
+    # reader: inventory sheet
+    IssueCode.INVENTORY_MISSING_COLUMNS: (
+        "ไม่พบคอลัมน์ {columns} — แถวที่ 1 ต้องเป็นหัวตาราง "
+        "Size, Length, Quantity (หรือ ขนาด, ความยาว, จำนวน) ถ้าไม่มีเหล็กคงคลังให้ลบชีตนี้ได้"
+    ),
+    IssueCode.INVENTORY_SIZE_UNUSED: (
+        "เหล็กคงคลัง Size {sizes} ไม่ถูกใช้ เพราะไม่มีชิ้นงาน Size นี้ "
+        "ถ้าเป็นขนาดเดียวกับชิ้นงานกรุณาแก้ชื่อ Size ให้ตรงกัน"
+    ),
     # settings
     IssueCode.STOCK_EMPTY: "กรุณากรอกความยาวเหล็กเส้น (stock) อย่างน้อย 1 ค่า",
     IssueCode.STOCK_INVALID_NUMBER: 'ความยาวเหล็กเส้น "{text}" ไม่ใช่ตัวเลข',
@@ -146,8 +155,11 @@ def _template_params(params: Mapping[str, object]) -> dict[str, str]:
 
 
 def format_issue(issue: Issue) -> str:
-    """Thai message for ``issue`` (no severity prefix)."""
-    return MESSAGES[issue.code].format_map(_template_params(issue.params))
+    """Thai message for ``issue`` (no severity prefix); issues from a sheet other
+    than the pieces sheet are prefixed with the sheet name."""
+    message = MESSAGES[issue.code].format_map(_template_params(issue.params))
+    sheet = issue.params.get("sheet")
+    return f"ชีต {sheet}: {message}" if sheet else message
 
 
 def format_issue_with_severity(issue: Issue) -> str:
@@ -172,6 +184,7 @@ SHEET_NAMES: dict[str, str] = {
     "details": "รายละเอียดการตัด",
     "summary": "สรุปต่อ Size",
     "purchase": "รายการสั่งซื้อ",
+    "inventory": "ใช้จากคงคลัง",
     "remnants": "เศษคงเหลือ",
     "unplaced": "วางไม่ได้",
     "check": "ตรวจสอบจำนวน",
@@ -185,6 +198,7 @@ HEADERS: dict[str, tuple[str, ...]] = {
         "แบบที่",
         "จำนวนเส้นที่ตัดแบบนี้",
         "ความยาว stock (m)",
+        "แหล่ง stock",
         "รายการชิ้น",
         "จำนวนชิ้นต่อเส้น",
         "ความยาวชิ้นรวม (m)",
@@ -197,6 +211,7 @@ HEADERS: dict[str, tuple[str, ...]] = {
         "Size",
         "แบบที่",
         "stock (m)",
+        "แหล่ง stock",
         "No",
         "Length (m)",
         "ชิ้นต่อเส้น",
@@ -208,6 +223,8 @@ HEADERS: dict[str, tuple[str, ...]] = {
         "จำนวนเส้นแยกตาม stock",
         "จำนวนเส้นรวม",
         "stock รวม (m)",
+        "ซื้อใหม่ (m)",
+        "ใช้จากคงคลัง (m)",
         "ชิ้นงานรวม (m)",
         "เศษใช้ต่อได้รวม (m)",
         "Waste รวม (m)",
@@ -221,6 +238,15 @@ HEADERS: dict[str, tuple[str, ...]] = {
         "gap %",
     ),
     "purchase": ("Size", "ความยาว stock (m)", "จำนวนเส้น", "ความยาวรวม (m)", "น้ำหนัก (kg)"),
+    "inventory": (
+        "Size",
+        "ความยาว (m)",
+        "จำนวนที่มี",
+        "จำนวนที่ใช้",
+        "คงเหลือ",
+        "ความยาวที่ใช้รวม (m)",
+        "น้ำหนักที่ใช้ (kg)",
+    ),
     "remnants": ("Size", "ความยาวเศษ (m)", "จำนวน", "ชิ้นยาวสุดที่ตัดได้ (m)"),
     "unplaced": ("Size", "No", "Length (m)", "Quantity", "เหตุผล"),
     "check": ("Size", "No", "จำนวน Input", "จำนวนที่ตัด", "จำนวนที่วางไม่ได้", "ผล"),
@@ -238,6 +264,7 @@ STATUS_LABELS_SHEET: dict[str, str] = {
     "kerf": "ความกว้างใบตัด (มม.)",
     "time_limit": "เวลาคำนวณสูงสุดต่อ Size (วินาที)",
     "seed": "random seed",
+    "inventory": "เหล็กคงคลัง",
     "worst_status": "สถานะแย่สุดของทุก Size",
     "warnings": "คำเตือน",
     "note": "หมายเหตุ",
@@ -249,6 +276,13 @@ REPRODUCIBILITY_NOTE = (
 )
 
 SUBTOTAL_TEXT = "รวม {size}"
+
+STOCK_SOURCE_LABELS: dict[str, str] = {
+    "new": "ซื้อใหม่",
+    "inventory": "คงคลัง",
+}
+INVENTORY_SHEET_TEXT = "ชีต {sheet}: {count} รายการ"
+INVENTORY_TAG = " (คงคลัง)"
 
 # --- CLI text ---------------------------------------------------------------------
 
@@ -267,6 +301,7 @@ CLI_TEXT: dict[str, str] = {
     "size_header": "Size {size} — สถานะ {status}",
     "single_stock": "  ความยาวเหล็กเส้นที่เลือก: {stock_m} ม.",
     "stock_count": "  สั่งซื้อ: {items}",
+    "inventory_count": "  ใช้จากคงคลัง: {items}",
     "stock_item": "{stock_m} ม. × {count} เส้น",
     "totals": (
         "  เหล็กรวม {stock_m} ม. | ชิ้นงานรวม {pieces_m} ม. | เศษใช้ต่อได้ {reusable_m} ม. | "
@@ -278,6 +313,7 @@ CLI_TEXT: dict[str, str] = {
     "unplaced_header": "ชิ้นงานที่วางไม่ได้:",
     "unplaced_item": "  Size {size} No {no} ยาว {length_m} ม. × {quantity} ชิ้น — {reason}",
     "grand_total": "รวมทุก Size: เหล็ก {bars} เส้น ยาวรวม {stock_m} ม.",
+    "grand_total_split": "  ซื้อใหม่ {new_m} ม. | ใช้จากคงคลัง {inventory_m} ม.",
     "help_output": "ไฟล์ Excel ผลลัพธ์ (.xlsx)",
     "output_written": "บันทึกไฟล์แล้ว: {path}",
     "warnings_header": "คำเตือน:",
@@ -338,13 +374,14 @@ GUI_TEXT: dict[str, str] = {
     # results
     "results_empty": "ยังไม่มีผลลัพธ์ — กรอกข้อมูลทางซ้ายแล้วกด คำนวณ",
     "total_stock": "เหล็กรวม",
-    "total_weight": "น้ำหนักรวม",
+    "total_weight": "น้ำหนักที่ซื้อ",
     "total_reusable": "เศษใช้ต่อได้",
     "total_waste": "Waste",
     "utilization": "ใช้ประโยชน์",
     "worst_status": "สถานะ",
     "metres": "{value} ม.",
     "kg": "{value:,.1f} kg",
+    "from_inventory": "คงคลัง {value} ม.",
     "percent": "{value:.1f}%",
     "weight_unknown": "—",
     "unplaced_banner": "มีชิ้นงาน {count} ชิ้นที่วางไม่ได้ (ยาวกว่าเหล็กเส้นที่ยาวที่สุด):",
@@ -376,6 +413,7 @@ GUI_TEXT: dict[str, str] = {
     "preview_title": "ภาพแผนการตัด",
     "preview_count": "×{count}",
     "preview_stock": "{stock_m} ม.",
+    "preview_stock_inventory": "{stock_m} ม. คงคลัง",
     "preview_piece": ("No.{no} ยาว {length_m} ม.\n{per_bar} ชิ้นต่อเส้น × {count} เส้น = {total} ชิ้น"),
     "preview_kerf": "รอยตัด {length_mm} มม.",
     "preview_reusable": "เศษใช้ต่อได้ {length_m} ม. (ตัดชิ้นยาว {longest_m} ม. ได้) × {count} เส้น",

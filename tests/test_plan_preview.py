@@ -9,7 +9,15 @@ from PySide6.QtCore import QPoint
 from PySide6.QtGui import QPixmap
 from pytestqt.qtbot import QtBot
 
-from rebar_optimizer.domain.models import Bar, BarGroup, Cut, Piece, SizePlan, SolveStatus
+from rebar_optimizer.domain.models import (
+    Bar,
+    BarGroup,
+    Cut,
+    InventoryStock,
+    Piece,
+    SizePlan,
+    SolveStatus,
+)
 from rebar_optimizer.domain.settings import OptimizerSettings
 from rebar_optimizer.services import planner
 from rebar_optimizer.ui.theme import DARK, LIGHT
@@ -21,6 +29,7 @@ from rebar_optimizer.ui.widgets.plan_preview import (
     SegmentKind,
     build_rows,
     no_colors,
+    stock_label,
 )
 
 pytestmark = pytest.mark.gui
@@ -153,3 +162,20 @@ def test_empty_plan_paints(qtbot: QtBot) -> None:
     pixmap = QPixmap(preview.size())
     preview.render(pixmap)
     assert preview.rows() == []
+
+
+def test_inventory_bars_are_labelled(qtbot: QtBot) -> None:
+    pieces = [Piece("DB12", "1", 6000, 3, (2,))]  # 2 on a new 12 m bar, 1 on the 7.3 m bar
+    settings = OptimizerSettings(stock_lengths_mm=(12000,), time_limit_s=5)
+    plan = planner.plan(pieces, settings, inventory=[InventoryStock("DB12", 7300, 1, (2,))])
+    rows = build_rows(plan.sizes[0])
+    assert sorted((r.stock_mm, r.inventory) for r in rows) == [(7300, True), (12000, False)]
+    labels = {stock_label(r) for r in rows}
+    assert labels == {"7.300 ม. คงคลัง", "12.000 ม."}
+    preview = PlanPreview()
+    qtbot.addWidget(preview)
+    preview.set_plan(plan.sizes[0])
+    preview.resize(600, preview.sizeHint().height())
+    pixmap = QPixmap(preview.size())
+    preview.render(pixmap)
+    assert not pixmap.isNull()

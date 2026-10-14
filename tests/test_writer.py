@@ -77,8 +77,8 @@ def test_number_formats(template_output: tuple[CuttingPlan, openpyxl.Workbook]) 
     assert plan_sheet["D2"].number_format == "0.000"
     assert plan_sheet.page_setup.orientation == "landscape"
     summary = workbook[th.SHEET_NAMES["summary"]]
-    assert summary["J2"].number_format == "0.0"
-    assert summary["I2"].number_format == "0.0%"
+    assert summary["L2"].number_format == "0.0"
+    assert summary["K2"].number_format == "0.0%"
 
 
 # --- totals: summary sheet == sum of the per-bar sheet (D7 rule 5) ------------------------
@@ -92,17 +92,18 @@ def test_summary_matches_bar_rows(template_output: tuple[CuttingPlan, openpyxl.W
         bars = [r for r in plan_rows if r[0] == size_plan.size]
         count = sum(int(str(r[2])) for r in bars)
         stock = sum(float(str(r[2])) * float(str(r[3])) for r in bars)
-        pieces = sum(float(str(r[2])) * float(str(r[6])) for r in bars)
-        kerf_loss = sum(float(str(r[2])) * float(str(r[7])) for r in bars)
-        remnant = sum(float(str(r[2])) * float(str(r[8])) for r in bars)
-        reusable = sum(float(str(r[2])) * float(str(r[8])) for r in bars if r[9] == th.CHECK_OK)
+        pieces = sum(float(str(r[2])) * float(str(r[7])) for r in bars)
+        kerf_loss = sum(float(str(r[2])) * float(str(r[8])) for r in bars)
+        remnant = sum(float(str(r[2])) * float(str(r[9])) for r in bars)
+        reusable = sum(float(str(r[2])) * float(str(r[9])) for r in bars if r[10] == th.CHECK_OK)
         row = summary[size_plan.size]
         assert row[2] == count == size_plan.bar_count
         assert row[3] == pytest.approx(stock) == size_plan.total_stock_mm / 1000
-        assert row[4] == pytest.approx(pieces)
-        assert row[5] == pytest.approx(reusable)
-        assert row[6] == pytest.approx(remnant - reusable)
-        assert row[7] == pytest.approx(kerf_loss)
+        assert (row[4], row[5]) == (pytest.approx(stock), 0)  # no inventory: all purchased
+        assert row[6] == pytest.approx(pieces)
+        assert row[7] == pytest.approx(reusable)
+        assert row[8] == pytest.approx(remnant - reusable)
+        assert row[9] == pytest.approx(kerf_loss)
         assert stock == pytest.approx(pieces + kerf_loss + remnant)
     total = summary[th.TOTAL_TEXT]
     assert total[3] == pytest.approx(sum(sp.total_stock_mm for sp in plan.sizes) / 1000)
@@ -114,8 +115,8 @@ def test_details_sheet_adds_up_to_input(
     _, workbook = template_output
     totals: dict[str, int] = {}
     for r in rows(workbook[th.SHEET_NAMES["details"]]):
-        assert r[7] == int(str(r[5])) * int(str(r[6]))
-        totals[str(r[3])] = totals.get(str(r[3]), 0) + int(str(r[7]))
+        assert r[8] == int(str(r[6])) * int(str(r[7]))
+        totals[str(r[4])] = totals.get(str(r[4]), 0) + int(str(r[8]))
     check = rows(workbook[th.SHEET_NAMES["check"]])
     assert totals == {str(r[1]): r[2] for r in check}
 
@@ -159,7 +160,7 @@ def test_empty_sheets_say_none(tmp_path: Path) -> None:
     _, workbook = plan_and_write(
         tmp_path, [Piece("DB12", "1", 6000, 2, (2,))], OptimizerSettings(stock_lengths_mm=(12000,))
     )
-    for key in ("remnants", "unplaced"):
+    for key in ("inventory", "remnants", "unplaced"):
         assert rows(workbook[th.SHEET_NAMES[key]]) == [
             (th.NONE_TEXT,) + (None,) * (len(th.HEADERS[key]) - 1)
         ]
@@ -177,15 +178,15 @@ def test_unplaced_and_remnant_rows(tmp_path: Path) -> None:
     # 12 - 7 - 2 = 3 m left; the 2 m piece length fits it -> reusable, longest cuttable 2 m
     assert rows(workbook[th.SHEET_NAMES["remnants"]]) == [("DB12", 3.0, 1, 2.0)]
     plan_row = rows(workbook[th.SHEET_NAMES["plan"]])[0]
-    assert plan_row[9:] == (th.CHECK_OK, 2.0)
+    assert plan_row[10:] == (th.CHECK_OK, 2.0)
 
 
 def test_waste_row_has_no_tick(tmp_path: Path) -> None:
     pieces = [Piece("DB12", "1", 5000, 2, (2,))]
     _, workbook = plan_and_write(tmp_path, pieces, OptimizerSettings(stock_lengths_mm=(12000,)))
     plan_row = rows(workbook[th.SHEET_NAMES["plan"]])[0]
-    assert plan_row[8] == 2.0  # 2 m remnant, shorter than every piece (5 m) -> waste
-    assert plan_row[9:] == (None, None)
+    assert plan_row[9] == 2.0  # 2 m remnant, shorter than every piece (5 m) -> waste
+    assert plan_row[10:] == (None, None)
 
 
 # --- weights ------------------------------------------------------------------------
@@ -202,7 +203,7 @@ def test_unknown_size_weight_left_blank_with_warning(tmp_path: Path) -> None:
     pieces = [Piece("ปลอก", "1", 1000, 1, (2,))]
     _, workbook = plan_and_write(tmp_path, pieces, OptimizerSettings(stock_lengths_mm=(12000,)))
     summary = rows(workbook[th.SHEET_NAMES["summary"]])
-    assert summary[0][9:12] == (None, None, None)
+    assert summary[0][11:14] == (None, None, None)
     status_text = [str(r[1]) for r in rows(workbook[th.SHEET_NAMES["status"]])]
     assert any("ปลอก" in t and "น้ำหนัก" in t for t in status_text)
 

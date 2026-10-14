@@ -24,7 +24,14 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from rebar_optimizer import __version__
 from rebar_optimizer.domain.errors import Issue, IssueCode, OutputWriteError
-from rebar_optimizer.domain.models import CuttingPlan, Piece, PieceKey, SolveStatus
+from rebar_optimizer.domain.models import (
+    CuttingPlan,
+    InventoryStock,
+    Piece,
+    PieceKey,
+    SolveStatus,
+    StockSource,
+)
 from rebar_optimizer.domain.weights import unit_weight_kg_per_m
 from rebar_optimizer.i18n import th
 from rebar_optimizer.io.reader import InputTable
@@ -46,6 +53,9 @@ class WriteSource:
     input_path: Path | None = None
     warnings: Sequence[Issue] = ()
     """Reader warnings, shown on the status sheet."""
+    inventory: Sequence[InventoryStock] = ()
+    """Bars on hand from the input's inventory sheet (phase 8)."""
+    inventory_sheet: str | None = None
 
 
 Row = Sequence[object]
@@ -77,6 +87,7 @@ def build_workbook(
     _details_sheet(workbook, plan)
     _summary_sheet(workbook, plan, summaries, weights)
     _purchase_sheet(workbook, summaries, weights)
+    _inventory_sheet(workbook, plan, source.inventory, weights)
     _remnants_sheet(workbook, plan)
     _unplaced_sheet(workbook, plan)
     _check_sheet(workbook, plan, source.pieces)
@@ -101,6 +112,7 @@ def _plan_sheet(workbook: openpyxl.Workbook, plan: CuttingPlan) -> None:
                     index,
                     group.count,
                     _m(usage.stock_length_mm),
+                    th.STOCK_SOURCE_LABELS[group.bar.source],
                     th.format_cuts(cut_runs(group.bar.cuts)),
                     usage.piece_count,
                     _m(usage.pieces_mm),
@@ -114,7 +126,7 @@ def _plan_sheet(workbook: openpyxl.Workbook, plan: CuttingPlan) -> None:
         workbook,
         "plan",
         rows,
-        {3: METRE_FORMAT, 6: METRE_FORMAT, 7: METRE_FORMAT, 8: METRE_FORMAT, 10: METRE_FORMAT},
+        {3: METRE_FORMAT, 7: METRE_FORMAT, 8: METRE_FORMAT, 9: METRE_FORMAT, 11: METRE_FORMAT},
     )
     sheet.page_setup.orientation = "landscape"
     sheet.page_setup.fitToWidth = 1
@@ -134,6 +146,7 @@ def _details_sheet(workbook: openpyxl.Workbook, plan: CuttingPlan) -> None:
                         size_plan.size,
                         index,
                         _m(group.bar.stock_length_mm),
+                        th.STOCK_SOURCE_LABELS[group.bar.source],
                         no,
                         _m(length),
                         count,
@@ -141,7 +154,7 @@ def _details_sheet(workbook: openpyxl.Workbook, plan: CuttingPlan) -> None:
                         count * group.count,
                     )
                 )
-    _table_sheet(workbook, "details", rows, {2: METRE_FORMAT, 4: METRE_FORMAT})
+    _table_sheet(workbook, "details", rows, {2: METRE_FORMAT, 5: METRE_FORMAT})
 
 
 def _summary_sheet(
@@ -156,15 +169,17 @@ def _summary_sheet(
         rows.append(
             (
                 size_plan.size,
-                _stock_breakdown(summary.bars_by_stock),
+                _stock_breakdown(summary.bars_by_stock, summary.inventory_by_stock),
                 summary.bar_count,
                 _m(summary.stock_mm),
+                _m(summary.new_stock_mm),
+                _m(summary.inventory_mm),
                 _m(summary.pieces_mm),
                 _m(summary.reusable_mm),
                 _m(summary.waste_mm),
                 _m(summary.kerf_mm),
                 summary.utilization if summary.stock_mm else None,
-                _kg(summary.stock_mm, w),
+                _kg(summary.new_stock_mm, w),
                 _kg(summary.reusable_mm, w),
                 _kg(summary.waste_mm, w),
                 th.STATUS_LABELS[size_plan.status] if size_plan.groups else None,
@@ -181,12 +196,14 @@ def _summary_sheet(
                 None,
                 sum(s.bar_count for s in summaries),
                 _m(total_stock),
+                _m(sum(s.new_stock_mm for s in summaries)),
+                _m(sum(s.inventory_mm for s in summaries)),
                 _m(total_pieces),
                 _m(sum(s.reusable_mm for s in summaries)),
                 _m(sum(s.waste_mm for s in summaries)),
                 _m(sum(s.kerf_mm for s in summaries)),
                 total_pieces / total_stock if total_stock else None,
-                _sum_known(_kg(s.stock_mm, weights[s.size]) for s in summaries),
+                _sum_known(_kg(s.new_stock_mm, weights[s.size]) for s in summaries),
                 _sum_known(_kg(s.reusable_mm, weights[s.size]) for s in summaries),
                 _sum_known(_kg(s.waste_mm, weights[s.size]) for s in summaries),
                 None,
@@ -194,9 +211,9 @@ def _summary_sheet(
                 None,
             )
         )
-    formats = {i: METRE_FORMAT for i in (3, 4, 5, 6, 7, 13)}
+    formats = {i: METRE_FORMAT for i in (3, 4, 5, 6, 7, 8, 9, 15)}
     formats.update(
-        {8: PERCENT_FORMAT, 14: PERCENT_FORMAT, 9: KG_FORMAT, 10: KG_FORMAT, 11: KG_FORMAT}
+        {10: PERCENT_FORMAT, 16: PERCENT_FORMAT, 11: KG_FORMAT, 12: KG_FORMAT, 13: KG_FORMAT}
     )
     sheet = _table_sheet(workbook, "summary", rows, formats)
     if rows:
@@ -219,19 +236,20 @@ def _purchase_sheet(
         w = weights[summary.size]
         for stock, count in summary.bars_by_stock.items():
             rows.append((summary.size, _m(stock), count, _m(stock * count), _kg(stock * count, w)))
-        size_kg = _kg(summary.stock_mm, w)
+        size_bars = sum(summary.bars_by_stock.values())
+        size_kg = _kg(summary.new_stock_mm, w)
         rows.append(
             (
                 th.SUBTOTAL_TEXT.format(size=summary.size),
                 None,
-                summary.bar_count,
-                _m(summary.stock_mm),
+                size_bars,
+                _m(summary.new_stock_mm),
                 size_kg,
             )
         )
         subtotal_rows.append(len(rows) + 1)
-        grand_bars += summary.bar_count
-        grand_mm += summary.stock_mm
+        grand_bars += size_bars
+        grand_mm += summary.new_stock_mm
         grand_kg.append(size_kg)
     if rows:
         rows.append((th.TOTAL_TEXT, None, grand_bars, _m(grand_mm), _sum_known(grand_kg)))
@@ -241,6 +259,58 @@ def _purchase_sheet(
     )
     for row in subtotal_rows:
         _bold_row(sheet, row)
+
+
+def _inventory_sheet(
+    workbook: openpyxl.Workbook,
+    plan: CuttingPlan,
+    inventory: Sequence[InventoryStock],
+    weights: dict[str, float | None],
+) -> None:
+    """Every inventory entry of the input with how many bars the plan takes
+    (recounted from the bars), kept apart from the purchase list."""
+    used: Counter[tuple[str, int]] = Counter()
+    for size_plan in plan.sizes:
+        for group in size_plan.groups:
+            if group.bar.source is StockSource.INVENTORY:
+                used[(size_plan.size, group.bar.stock_length_mm)] += group.count
+    rows: list[Row] = []
+    totals = [0, 0, 0, 0]
+    used_kg: list[float | None] = []
+    for item in inventory:
+        n = used[(item.size, item.length_mm)]
+        kg = _kg(item.length_mm * n, weights.get(item.size))
+        rows.append(
+            (
+                item.size,
+                _m(item.length_mm),
+                item.quantity,
+                n,
+                item.quantity - n,
+                _m(item.length_mm * n),
+                kg,
+            )
+        )
+        for i, value in enumerate((item.quantity, n, item.quantity - n, item.length_mm * n)):
+            totals[i] += value
+        used_kg.append(kg)
+    if rows:
+        rows.append(
+            (
+                th.TOTAL_TEXT,
+                None,
+                totals[0],
+                totals[1],
+                totals[2],
+                _m(totals[3]),
+                _sum_known(used_kg),
+            )
+        )
+    sheet = _table_sheet(
+        workbook, "inventory", rows, {1: METRE_FORMAT, 5: METRE_FORMAT, 6: KG_FORMAT}
+    )
+    if rows:
+        _bold_row(sheet, len(rows) + 1)
 
 
 def _remnants_sheet(workbook: openpyxl.Workbook, plan: CuttingPlan) -> None:
@@ -316,6 +386,14 @@ def _status_sheet(
         (labels["kerf"], settings.kerf_mm),
         (labels["time_limit"], settings.time_limit_s),
         (labels["seed"], settings.random_seed),
+        (
+            labels["inventory"],
+            th.INVENTORY_SHEET_TEXT.format(
+                sheet=source.inventory_sheet, count=len(source.inventory)
+            )
+            if source.inventory and source.inventory_sheet is not None
+            else th.NONE_TEXT,
+        ),
         (labels["worst_status"], th.STATUS_LABELS[worst] if worst else None),
     ]
     if any(sp.status is not SolveStatus.GREEDY for sp in plan.sizes if sp.groups):
@@ -407,10 +485,14 @@ def _sum_known(values: Iterable[float | None]) -> float | None:
     return sum(known) if known else None
 
 
-def _stock_breakdown(bars_by_stock: dict[int, int]) -> str | None:
-    if not bars_by_stock:
-        return None
-    return ", ".join(f"{th.format_metres(s)} × {n}" for s, n in bars_by_stock.items())
+def _stock_breakdown(
+    bars_by_stock: dict[int, int], inventory_by_stock: dict[int, int]
+) -> str | None:
+    parts = [f"{th.format_metres(s)} × {n}" for s, n in bars_by_stock.items()]
+    parts += [
+        f"{th.format_metres(s)} × {n}{th.INVENTORY_TAG}" for s, n in inventory_by_stock.items()
+    ]
+    return ", ".join(parts) or None
 
 
 def _unit_weights(plan: CuttingPlan, issues: list[Issue]) -> dict[str, float | None]:
