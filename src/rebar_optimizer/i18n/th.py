@@ -372,6 +372,17 @@ GUI_TEXT: dict[str, str] = {
     ),
     "copy": "คัดลอก",
     "close": "ปิด",
+    # cutting plan preview
+    "preview_title": "ภาพแผนการตัด",
+    "preview_count": "×{count}",
+    "preview_stock": "{stock_m} ม.",
+    "preview_piece": ("No.{no} ยาว {length_m} ม.\n{per_bar} ชิ้นต่อเส้น × {count} เส้น = {total} ชิ้น"),
+    "preview_kerf": "รอยตัด {length_mm} มม.",
+    "preview_reusable": "เศษใช้ต่อได้ {length_m} ม. (ตัดชิ้นยาว {longest_m} ม. ได้) × {count} เส้น",
+    "preview_waste": "Waste {length_m} ม. × {count} เส้น",
+    "preview_empty": "ไม่มีเส้นที่ต้องตัดใน Size นี้",
+    "file_dropped": "เลือกไฟล์แล้ว: {name}",
+    "drop_not_xlsx": "ลากได้เฉพาะไฟล์ Excel (.xlsx)",
 }
 
 GUI_SIZE_TABLE_HEADERS: tuple[str, ...] = (

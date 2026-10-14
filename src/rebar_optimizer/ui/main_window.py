@@ -11,8 +11,16 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, Qt, QThread, QUrl
-from PySide6.QtGui import QCloseEvent, QDesktopServices, QGuiApplication
+from PySide6.QtCore import QByteArray, QMimeData, Qt, QThread, QUrl
+from PySide6.QtGui import (
+    QCloseEvent,
+    QDesktopServices,
+    QDragEnterEvent,
+    QDropEvent,
+    QGuiApplication,
+    QKeySequence,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -40,7 +48,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
-    QToolButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -51,6 +59,7 @@ from rebar_optimizer.domain.errors import (
     OutputWriteError,
     SettingsError,
 )
+from rebar_optimizer.domain.models import CuttingPlan
 from rebar_optimizer.domain.settings import (
     KERF_MAX_MM,
     KERF_MIN_MM,
@@ -60,12 +69,17 @@ from rebar_optimizer.domain.settings import (
 )
 from rebar_optimizer.i18n import th
 from rebar_optimizer.i18n.th import GUI_TEXT, format_metres
+from rebar_optimizer.io.reader import SUPPORTED_SUFFIXES
 from rebar_optimizer.io.template import write_template
 from rebar_optimizer.io.writer import WriteSource, write_plan
 from rebar_optimizer.services.cancel import ProgressEvent, ProgressKind
 from rebar_optimizer.services.summary import plan_totals, summarize_size
-from rebar_optimizer.ui import user_settings
+from rebar_optimizer.ui import animations, user_settings
+from rebar_optimizer.ui.theme import Theme, current_theme
 from rebar_optimizer.ui.user_settings import UserSettings
+from rebar_optimizer.ui.widgets.collapsible import CollapsibleSection
+from rebar_optimizer.ui.widgets.plan_preview import PlanPreview
+from rebar_optimizer.ui.widgets.toast import Toast
 from rebar_optimizer.ui.worker import PlanOutcome, PlanWorker, start_worker
 
 logger = logging.getLogger(__name__)
@@ -115,8 +129,15 @@ class IssuesDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, settings_path: Path | None = None, log_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        settings_path: Path | None = None,
+        log_path: Path | None = None,
+        theme: Theme | None = None,
+    ) -> None:
         super().__init__()
+        self._theme = theme or current_theme()
+        self.previews: list[PlanPreview] = []
         self._settings_path = settings_path
         self._log_path = log_path
         self._user = user_settings.load(settings_path)
@@ -136,9 +157,62 @@ class MainWindow(QMainWindow):
         self.splitter.setSizes([400, 800])
         self.setCentralWidget(self.splitter)
 
+        self.toast = Toast(self)
+        self.setAcceptDrops(True)
+        self._install_shortcuts()
+
         self._apply_user_settings()
         self._on_stock_changed(self.stock_edit.text())
         self._show_results(None)
+
+    def _install_shortcuts(self) -> None:
+        bindings = [
+            ("Ctrl+O", self._shortcut_open),
+            ("Ctrl+Return", self.start_computation),
+            ("Ctrl+Enter", self.start_computation),
+            ("Ctrl+S", self._shortcut_save),
+            ("Esc", self.cancel_computation),
+        ]
+        self.shortcuts: dict[str, QShortcut] = {}
+        for sequence, slot in bindings:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.activated.connect(slot)
+            self.shortcuts[sequence] = shortcut
+
+    def _shortcut_open(self) -> None:
+        if not self.is_running():
+            self.choose_input()
+
+    def _shortcut_save(self) -> None:
+        if self.save_button.isEnabled():
+            self.save_result()
+
+    # --- drag and drop -------------------------------------------------------------------
+
+    @staticmethod
+    def dropped_excel_path(mime: QMimeData) -> Path | None:
+        """The single local .xlsx/.xlsm file being dragged, if that is what it is."""
+        urls = [u for u in mime.urls() if u.isLocalFile()]
+        if len(urls) != 1:
+            return None
+        path = Path(urls[0].toLocalFile())
+        return path if path.suffix.lower() in SUPPORTED_SUFFIXES else None
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802 - Qt override
+        if not self.is_running() and self.dropped_excel_path(event.mimeData()) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802 - Qt override
+        path = self.dropped_excel_path(event.mimeData())
+        if path is None or self.is_running():
+            self.toast.show_message(GUI_TEXT["drop_not_xlsx"])
+            event.ignore()
+            return
+        self.choose_input(path)
+        self.toast.show_message(GUI_TEXT["file_dropped"].format(name=path.name))
+        event.acceptProposedAction()
 
     # --- layout --------------------------------------------------------------------
 
@@ -195,12 +269,6 @@ class MainWindow(QMainWindow):
         stock_layout.addLayout(kerf_row)
         layout.addWidget(stock_group)
 
-        self.advanced_toggle = QToolButton()
-        self.advanced_toggle.setText(GUI_TEXT["advanced"])
-        self.advanced_toggle.setCheckable(True)
-        self.advanced_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.advanced_toggle.toggled.connect(self._set_advanced_open)
-        layout.addWidget(self.advanced_toggle)
         self.advanced_box = QGroupBox()
         advanced_layout = QGridLayout(self.advanced_box)
         advanced_layout.addWidget(QLabel(GUI_TEXT["time_limit_label"]), 0, 0)
@@ -210,8 +278,10 @@ class MainWindow(QMainWindow):
         self.time_limit_spin.setSuffix(GUI_TEXT["time_limit_suffix"])
         advanced_layout.addWidget(self.time_limit_spin, 0, 1)
         self.animations_check = QCheckBox(GUI_TEXT["animations"])
+        self.animations_check.toggled.connect(animations.set_user_enabled)
         advanced_layout.addWidget(self.animations_check, 1, 0, 1, 2)
-        layout.addWidget(self.advanced_box)
+        self.advanced_section = CollapsibleSection(GUI_TEXT["advanced"], self.advanced_box)
+        layout.addWidget(self.advanced_section)
 
         buttons = QHBoxLayout()
         self.compute_button = QPushButton(GUI_TEXT["compute"])
@@ -234,16 +304,12 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel(GUI_TEXT["status_ready"])
         self.status_label.setObjectName("muted")
         layout.addWidget(self.status_label)
-        self.log_toggle = QToolButton()
-        self.log_toggle.setText(GUI_TEXT["log_toggle"])
-        self.log_toggle.setCheckable(True)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
-        self.log_view.setVisible(False)
-        self.log_toggle.toggled.connect(self.log_view.setVisible)
-        layout.addWidget(self.log_toggle)
-        layout.addWidget(self.log_view, 1)
+        self.log_view.setMinimumHeight(120)
+        self.log_section = CollapsibleSection(GUI_TEXT["log_toggle"], self.log_view)
+        layout.addWidget(self.log_section)
         layout.addStretch()
 
         scroll = QScrollArea()
@@ -300,7 +366,12 @@ class MainWindow(QMainWindow):
         self.size_table.verticalHeader().setVisible(False)
         self.size_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.size_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.size_table, 1)
+        self.size_table.setMaximumHeight(150)
+        layout.addWidget(self.size_table)
+
+        self.preview_tabs = QTabWidget()
+        self.preview_tabs.setDocumentMode(True)
+        layout.addWidget(self.preview_tabs, 1)
 
         self.warnings_title = QLabel(GUI_TEXT["warnings_title"])
         self.warnings_title.setObjectName("metricLabel")
@@ -341,8 +412,8 @@ class MainWindow(QMainWindow):
         self.kerf_spin.setEnabled(u.kerf_enabled)
         self.time_limit_spin.setValue(u.time_limit_s)
         self.animations_check.setChecked(u.animations)
-        self.advanced_toggle.setChecked(u.advanced_open)
-        self._set_advanced_open(u.advanced_open)
+        animations.set_user_enabled(u.animations)
+        self.advanced_section.set_expanded(u.advanced_open, animate=False)
         if u.window_geometry:
             self.restoreGeometry(QByteArray.fromBase64(u.window_geometry.encode("ascii")))
         if u.splitter_state:
@@ -358,7 +429,7 @@ class MainWindow(QMainWindow):
         u.kerf_mm = self.kerf_spin.value()
         u.time_limit_s = self.time_limit_spin.value()
         u.animations = self.animations_check.isChecked()
-        u.advanced_open = self.advanced_toggle.isChecked()
+        u.advanced_open = self.advanced_section.is_expanded()
         u.window_geometry = bytes(self.saveGeometry().toBase64().data()).decode("ascii")
         u.splitter_state = bytes(self.splitter.saveState().toBase64().data()).decode("ascii")
         return u
@@ -367,12 +438,6 @@ class MainWindow(QMainWindow):
         user_settings.save(self.collect_user_settings(), self._settings_path)
 
     # --- form behaviour ----------------------------------------------------------------
-
-    def _set_advanced_open(self, open_: bool) -> None:
-        self.advanced_box.setVisible(open_)
-        self.advanced_toggle.setArrowType(
-            Qt.ArrowType.DownArrow if open_ else Qt.ArrowType.RightArrow
-        )
 
     def _on_stock_changed(self, text: str) -> None:
         lengths, errors = check_stock_text(text)
@@ -487,7 +552,7 @@ class MainWindow(QMainWindow):
         self.save_user_settings()
         self.log_view.clear()
         self._log(GUI_TEXT["log_started"].format(path=path))
-        self.progress_bar.setValue(0)
+        animations.animate_progress(self.progress_bar, 0)
         self.status_label.setText(GUI_TEXT["status_reading"])
 
         worker = PlanWorker(path, settings)
@@ -513,10 +578,10 @@ class MainWindow(QMainWindow):
         return thread is None or thread.wait(timeout_ms)
 
     def _on_progress(self, event: ProgressEvent) -> None:
-        self.progress_bar.setValue(round(event.fraction * PROGRESS_MAX))
+        animations.animate_progress(self.progress_bar, round(event.fraction * PROGRESS_MAX))
         params = {"size": event.size, "index": event.index + 1, "total": event.total}
         if event.kind is ProgressKind.SIZE_STARTED:
-            self.status_label.setText(GUI_TEXT["status_size"].format(**params))
+            animations.set_text_faded(self.status_label, GUI_TEXT["status_size"].format(**params))
             self._log(GUI_TEXT["log_size_started"].format(**params))
         else:
             self._log(GUI_TEXT["log_size_finished"].format(**params))
@@ -525,8 +590,8 @@ class MainWindow(QMainWindow):
         self._outcome = outcome
         self._last_saved = None
         self.saved_label.clear()
-        self.progress_bar.setValue(PROGRESS_MAX)
-        self.status_label.setText(GUI_TEXT["status_done"])
+        animations.animate_progress(self.progress_bar, PROGRESS_MAX)
+        animations.set_text_faded(self.status_label, GUI_TEXT["status_done"])
         self._show_results(outcome)
 
     def _on_input_invalid(self, exc: InputValidationError | SettingsError) -> None:
@@ -539,8 +604,8 @@ class MainWindow(QMainWindow):
         self._show_issues(header, exc.issues)
 
     def _on_cancelled(self) -> None:
-        self.progress_bar.setValue(0)
-        self.status_label.setText(GUI_TEXT["status_cancelled"])
+        animations.animate_progress(self.progress_bar, 0)
+        animations.set_text_faded(self.status_label, GUI_TEXT["status_cancelled"])
 
     def _on_crashed(self, message: str) -> None:
         self.status_label.setText(GUI_TEXT["status_failed"])
@@ -560,9 +625,22 @@ class MainWindow(QMainWindow):
     def _show_results(self, outcome: PlanOutcome | None) -> None:
         has = outcome is not None
         self.empty_label.setVisible(not has)
-        for widget in (self.summary_card, self.size_table, self.warnings_title, self.warnings_list):
-            widget.setVisible(has)
-        self.unplaced_banner.setVisible(bool(outcome and outcome.plan.unplaced))
+        result_widgets = (
+            self.summary_card,
+            self.size_table,
+            self.preview_tabs,
+            self.warnings_title,
+            self.warnings_list,
+        )
+        for widget in result_widgets:
+            if has:
+                animations.fade_in(widget)
+            else:
+                widget.setVisible(False)
+        if outcome is not None and outcome.plan.unplaced:
+            animations.fade_in(self.unplaced_banner)
+        else:
+            self.unplaced_banner.setVisible(False)
         self._update_actions()
         if outcome is None:
             return
@@ -626,9 +704,26 @@ class MainWindow(QMainWindow):
                     item.setToolTip(th.STATUS_LABELS[size_plan.status])
                 self.size_table.setItem(row, column, item)
 
+        self._show_previews(plan)
+
         self.warnings_list.clear()
         messages = [th.format_issue(i) for i in (*outcome.source.warnings, *plan.issues)]
         self.warnings_list.addItems(messages or [th.NONE_TEXT])
+
+    def _show_previews(self, plan: CuttingPlan) -> None:
+        self.preview_tabs.clear()
+        self.previews = []
+        stocks = [g.bar.stock_length_mm for sp in plan.sizes for g in sp.groups]
+        longest = max(stocks, default=1)
+        for size_plan in plan.sizes:
+            preview = PlanPreview(self._theme)
+            preview.set_plan(size_plan, max_stock_mm=longest)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidget(preview)
+            self.preview_tabs.addTab(scroll, size_plan.size)
+            self.previews.append(preview)
 
     # --- saving -------------------------------------------------------------------------
 
@@ -664,6 +759,7 @@ class MainWindow(QMainWindow):
         self._last_saved = written
         self._user.last_output_dir = str(written.parent)
         self.saved_label.setText(GUI_TEXT["saved"].format(path=written))
+        self.toast.show_message(GUI_TEXT["saved"].format(path=written.name))
         self.saved_label.setToolTip(str(written))
         self._update_actions()
         return True

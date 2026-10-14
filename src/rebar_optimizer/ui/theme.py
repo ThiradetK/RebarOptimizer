@@ -123,6 +123,10 @@ QFrame#warningBanner {{
 QFrame#warningBanner QLabel {{ color: {t.warning_text}; }}
 QFrame#summaryCard {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: 8px; }}
 QLabel#metricValue {{ font-size: 15pt; font-weight: 600; }}
+QWidget#toast {{ background: {t.text}; border-radius: 8px; }}
+QWidget#toast QLabel {{ color: {t.window}; }}
+QTabBar::tab {{ padding: 6px 14px; }}
+QTabBar::tab:selected {{ color: {t.accent}; font-weight: 600; }}
 QLabel#metricLabel {{ color: {t.text_muted}; }}
 QHeaderView::section {{
     background: {t.surface_alt}; border: none;

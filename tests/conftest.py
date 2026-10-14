@@ -7,13 +7,14 @@ import os
 # GUI tests run headless; must be set before any QApplication exists.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 import openpyxl
 import pytest
 
 from rebar_optimizer.logging_config import LOG_DIR_ENV
+from rebar_optimizer.ui import animations
 from rebar_optimizer.ui.user_settings import SETTINGS_ENV
 
 DEFAULT_HEADERS = ("Size", "No", "Length", "Quantity")
@@ -27,6 +28,14 @@ def _isolated_log_dir(
 ) -> None:
     """Never write logs to the real %LOCALAPPDATA% during tests."""
     monkeypatch.setenv(LOG_DIR_ENV, str(tmp_path_factory.getbasetemp() / "logs"))
+
+
+@pytest.fixture(autouse=True)
+def _no_animations() -> Iterator[None]:
+    """Animations are off in tests (6.3); a test may turn them on explicitly."""
+    animations.force(False)
+    yield
+    animations.force(False)
 
 
 @pytest.fixture(autouse=True)
