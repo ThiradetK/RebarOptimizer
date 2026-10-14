@@ -17,8 +17,8 @@ def test_cli_version_exits_cleanly(capsys: pytest.CaptureFixture[str]) -> None:
     assert rebar_optimizer.__version__ in capsys.readouterr().out
 
 
-def test_cli_no_args_returns_zero() -> None:
-    assert main([]) == 0
+def test_cli_no_args_asks_for_input() -> None:
+    assert main([]) == 1
 
 
 def test_ortools_cp_sat_importable() -> None:

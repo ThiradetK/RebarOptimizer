@@ -8,9 +8,19 @@ from pathlib import Path
 import openpyxl
 import pytest
 
+from rebar_optimizer.logging_config import LOG_DIR_ENV
+
 DEFAULT_HEADERS = ("Size", "No", "Length", "Quantity")
 
 MakeXlsx = Callable[..., Path]
+
+
+@pytest.fixture(autouse=True)
+def _isolated_log_dir(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never write logs to the real %LOCALAPPDATA% during tests."""
+    monkeypatch.setenv(LOG_DIR_ENV, str(tmp_path_factory.getbasetemp() / "logs"))
 
 
 @pytest.fixture
