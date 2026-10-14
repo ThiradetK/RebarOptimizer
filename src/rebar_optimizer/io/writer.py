@@ -48,8 +48,8 @@ METRE_FORMAT = "0.000"
 KG_FORMAT = "0.0"
 PERCENT_FORMAT = "0.0%"
 MAX_COLUMN_WIDTH = 60
-MAX_HEADER_WIDTH = 18
-"""Long headers wrap instead of widening the column past this many characters."""
+HEADER_EXTRA_WIDTH = 3
+"""Room for the autofilter button next to a header."""
 _BOLD = Font(bold=True)
 _HEADER_FONT = Font(bold=True, color="FFFFFF")
 _HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
@@ -488,7 +488,7 @@ def _finish(sheet: Worksheet, autofilter: bool) -> None:
         cell.fill = _HEADER_FILL
         cell.alignment = _HEADER_ALIGN
         cell.border = _BORDER
-    sheet.row_dimensions[1].height = 33
+    sheet.row_dimensions[1].height = 24
     for row_cells in sheet.iter_rows(min_row=2):
         for cell in row_cells:
             cell.border = _BORDER
@@ -511,7 +511,8 @@ def _finish(sheet: Worksheet, autofilter: bool) -> None:
 
 
 def _fit_columns(sheet: Worksheet, data_scale: float = 1.0) -> None:
-    """Widths from the longest value; headers count up to ``MAX_HEADER_WIDTH`` and wrap."""
+    """Widths from the longest value, header included. Thai has no spaces between
+    words, so Excel cannot wrap a Thai header: the column must fit all of it."""
     widths: dict[int, float] = {}
     for row_cells in sheet.iter_rows():
         for cell in row_cells:
@@ -520,7 +521,7 @@ def _fit_columns(sheet: Worksheet, data_scale: float = 1.0) -> None:
             text = f"{cell.value:.3f}" if isinstance(cell.value, float) else str(cell.value)
             width = _display_width(text)
             if cell.row == 1:
-                width = min(width * 1.1, MAX_HEADER_WIDTH)
+                width = width * 1.15 + HEADER_EXTRA_WIDTH  # bold text plus filter button
             else:
                 width *= data_scale
             widths[cell.column] = max(widths.get(cell.column, 0.0), width)

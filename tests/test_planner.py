@@ -6,9 +6,10 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from rebar_optimizer.domain.errors import Cancelled, IssueCode, SettingsError
+from rebar_optimizer.domain.errors import Cancelled, Issue, IssueCode, SettingsError
 from rebar_optimizer.domain.models import Piece
 from rebar_optimizer.domain.settings import OptimizerSettings, StockMode
+from rebar_optimizer.i18n import th
 from rebar_optimizer.services import planner
 from rebar_optimizer.services.cancel import CancelToken, ProgressEvent, ProgressKind
 from rebar_optimizer.services.summary import summarize_size
@@ -189,3 +190,21 @@ def test_plans_always_verify(
     for p in pieces:
         unplaced = sum(u.quantity for u in result.unplaced if u.no == p.no)
         assert cut[p.no] + unplaced == p.quantity
+
+
+def test_same_warning_for_several_sizes_is_merged() -> None:
+    issues = [
+        Issue.warning(IssueCode.PATTERN_LIMIT_EXCEEDED, size="DB12", max_patterns=5),
+        Issue.warning(IssueCode.TIME_LIMIT_HIT, size="DB12", seconds=1.0),
+        Issue.warning(IssueCode.PATTERN_LIMIT_EXCEEDED, size="DB16", max_patterns=5),
+        Issue.warning(IssueCode.TIME_LIMIT_HIT, size="DB20", seconds=0.5),
+    ]
+    merged = planner.merge_size_issues(issues)
+    assert [i.code for i in merged] == [
+        IssueCode.PATTERN_LIMIT_EXCEEDED,
+        IssueCode.TIME_LIMIT_HIT,
+        IssueCode.TIME_LIMIT_HIT,
+    ]
+    assert merged[0].params["size"] == ["DB12", "DB16"]
+    assert th.format_issue(merged[0]).startswith("Size DB12, DB16:")
+    assert merged[1].params["size"] == "DB12"  # different seconds: not merged

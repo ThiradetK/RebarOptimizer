@@ -112,9 +112,38 @@ def plan(
                 nos=[u.no for u in unplaced],
             )
         )
-    result = CuttingPlan(sizes=tuple(size_plans), settings=settings, issues=tuple(issues))
+    result = CuttingPlan(
+        sizes=tuple(size_plans), settings=settings, issues=tuple(merge_size_issues(issues))
+    )
     verify_plan(pieces, result, settings, inventory)
     return result
+
+
+def merge_size_issues(issues: Sequence[Issue]) -> list[Issue]:
+    """One issue per code instead of one per size when only the size differs,
+    e.g. ``Size DB12, DB16: ...`` (first occurrence keeps its place)."""
+    merged: dict[tuple[object, ...], tuple[Issue, list[object]]] = {}
+    result: list[Issue | tuple[object, ...]] = []
+    for issue in issues:
+        if "size" not in issue.params:
+            result.append(issue)
+            continue
+        rest = tuple(sorted((k, repr(v)) for k, v in issue.params.items() if k != "size"))
+        key = (issue.code, issue.severity, rest)
+        if key not in merged:
+            merged[key] = (issue, [])
+            result.append(key)
+        merged[key][1].append(issue.params["size"])
+    out: list[Issue] = []
+    for item in result:
+        if isinstance(item, Issue):
+            out.append(item)
+            continue
+        first, sizes = merged[item]
+        params = dict(first.params)
+        params["size"] = sizes if len(sizes) > 1 else sizes[0]
+        out.append(Issue(first.code, first.severity, params))
+    return out
 
 
 def inventory_per_size(inventory: Sequence[InventoryStock]) -> dict[str, dict[int, int]]:
