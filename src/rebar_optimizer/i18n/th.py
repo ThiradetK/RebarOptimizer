@@ -103,8 +103,8 @@ MESSAGES: dict[IssueCode, str] = {
     ),
     IssueCode.UNPLACED_TOO_LONG: "ยาวกว่าเหล็กเส้นที่ยาวที่สุด ({longest_stock_m} ม.)",
     IssueCode.PATTERN_LIMIT_EXCEEDED: (
-        "Size {size}: รูปแบบการตัดมีมากกว่า {max_patterns} แบบ จึงใช้ column generation "
-        "(สถานะ HEURISTIC) ซึ่งใกล้เคียงดีที่สุด ดูความห่างจากค่าที่ดีที่สุดได้ที่ gap %"
+        "Size {size}: รูปแบบการตัดมีมากกว่า {max_patterns} แบบ จึงคำนวณด้วย column generation "
+        "ผลที่ได้ดีที่สุดหรือใกล้เคียงที่สุด ดูสถานะและ gap % ของ Size นี้ในตารางสรุป"
     ),
     IssueCode.TIME_LIMIT_HIT: (
         "Size {size}: คำนวณครบเวลา {seconds} วินาทีก่อนพิสูจน์ได้ว่าดีที่สุด "
@@ -394,6 +394,9 @@ GUI_TEXT: dict[str, str] = {
     "log_size_finished": "เสร็จ Size {size}",
     # results
     "results_empty": "ยังไม่มีผลลัพธ์ — กรอกข้อมูลทางซ้ายแล้วกด คำนวณ",
+    "result_source": (
+        "ผลลัพธ์ของ {name} · stock {stocks} ม. · {mode} · ใบตัด {kerf} มม. · คำนวณเมื่อ {time} น."
+    ),
     "total_stock": "เหล็กรวม",
     "total_weight": "น้ำหนักที่ซื้อ",
     "total_reusable": "เศษใช้ต่อได้",

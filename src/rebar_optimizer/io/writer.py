@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import os
 import tempfile
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 import openpyxl
-from openpyxl.styles import Font
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -47,7 +48,19 @@ METRE_FORMAT = "0.000"
 KG_FORMAT = "0.0"
 PERCENT_FORMAT = "0.0%"
 MAX_COLUMN_WIDTH = 60
+MAX_HEADER_WIDTH = 18
+"""Long headers wrap instead of widening the column past this many characters."""
 _BOLD = Font(bold=True)
+_HEADER_FONT = Font(bold=True, color="FFFFFF")
+_HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
+_TOTAL_FILL = PatternFill("solid", fgColor="DDEBF7")
+_THIN = Side(style="thin", color="BFBFBF")
+_BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+_HEADER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
+_CENTER = Alignment(horizontal="center", vertical="center")
+_WRAP = Alignment(vertical="top", wrap_text=True)
+_FAIL_FONT = Font(bold=True, color="C00000")
+_TAB_COLORS = {"bar_counts": "2E75B6", "purchase": "2E75B6", "unplaced": "C00000"}
 
 
 @dataclass(frozen=True)
@@ -129,17 +142,12 @@ def _plan_sheet(workbook: openpyxl.Workbook, plan: CuttingPlan) -> None:
                     _m(detail.longest_cuttable_mm),
                 )
             )
-    sheet = _table_sheet(
+    _table_sheet(
         workbook,
         "plan",
         rows,
         {3: METRE_FORMAT, 7: METRE_FORMAT, 8: METRE_FORMAT, 9: METRE_FORMAT, 11: METRE_FORMAT},
     )
-    sheet.page_setup.orientation = "landscape"
-    sheet.page_setup.fitToWidth = 1
-    sheet.page_setup.fitToHeight = 0
-    sheet.sheet_properties.pageSetUpPr.fitToPage = True
-    sheet.print_title_rows = "1:1"
 
 
 def _details_sheet(workbook: openpyxl.Workbook, plan: CuttingPlan) -> None:
@@ -233,7 +241,11 @@ def _bar_counts_sheet(workbook: openpyxl.Workbook, plan: CuttingPlan) -> None:
         (th.format_bar_count(c.size, c.count, c.stock_length_mm, c.inventory),)
         for c in bar_counts(plan)
     ]
-    _table_sheet(workbook, "bar_counts", rows, {}, autofilter=False)
+    sheet = _table_sheet(workbook, "bar_counts", rows, {}, autofilter=False)
+    for row_cells in sheet.iter_rows(min_row=2):
+        for cell in row_cells:
+            cell.font = Font(size=12)
+    _fit_columns(sheet, data_scale=12 / 11)
 
 
 def _purchase_sheet(
@@ -418,7 +430,11 @@ def _status_sheet(
     rows.append((labels["warnings"], messages[0] if messages else th.NONE_TEXT))
     rows.extend((None, message) for message in messages[1:])
     sheet = _table_sheet(workbook, "status", rows, {}, autofilter=False)
-    sheet.column_dimensions["B"].width = MAX_COLUMN_WIDTH * 2
+    sheet.column_dimensions["B"].width = MAX_COLUMN_WIDTH * 1.5
+    for row_cells in sheet.iter_rows(min_row=2):
+        row_cells[0].font = _BOLD
+        row_cells[0].alignment = Alignment(vertical="top")
+        row_cells[1].alignment = _WRAP
 
 
 def _input_sheet(workbook: openpyxl.Workbook, table: InputTable) -> None:
@@ -466,25 +482,64 @@ def _cell_value(value: object) -> object:
 
 
 def _finish(sheet: Worksheet, autofilter: bool) -> None:
+    """Header band, grid, centred ✓/✗, column widths, frozen header and print setup."""
     for cell in sheet[1]:
-        cell.font = _BOLD
+        cell.font = _HEADER_FONT
+        cell.fill = _HEADER_FILL
+        cell.alignment = _HEADER_ALIGN
+        cell.border = _BORDER
+    sheet.row_dimensions[1].height = 33
+    for row_cells in sheet.iter_rows(min_row=2):
+        for cell in row_cells:
+            cell.border = _BORDER
+            if cell.value in (th.CHECK_OK, th.CHECK_FAIL):
+                cell.alignment = _CENTER
+                if cell.value == th.CHECK_FAIL:
+                    cell.font = _FAIL_FONT
     sheet.freeze_panes = "A2"
     if autofilter and sheet.max_row > 1:
         sheet.auto_filter.ref = sheet.dimensions
-    widths: dict[int, int] = {}
-    for row in sheet.iter_rows():
-        for cell in row:
+    _fit_columns(sheet)
+    color = next((c for key, c in _TAB_COLORS.items() if th.SHEET_NAMES[key] == sheet.title), None)
+    if color:
+        sheet.sheet_properties.tabColor = color
+    sheet.page_setup.orientation = "landscape"
+    sheet.page_setup.fitToWidth = 1
+    sheet.page_setup.fitToHeight = 0
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    sheet.print_title_rows = "1:1"
+
+
+def _fit_columns(sheet: Worksheet, data_scale: float = 1.0) -> None:
+    """Widths from the longest value; headers count up to ``MAX_HEADER_WIDTH`` and wrap."""
+    widths: dict[int, float] = {}
+    for row_cells in sheet.iter_rows():
+        for cell in row_cells:
             if cell.value is None:
                 continue
             text = f"{cell.value:.3f}" if isinstance(cell.value, float) else str(cell.value)
-            widths[cell.column] = max(widths.get(cell.column, 0), len(text))
+            width = _display_width(text)
+            if cell.row == 1:
+                width = min(width * 1.1, MAX_HEADER_WIDTH)
+            else:
+                width *= data_scale
+            widths[cell.column] = max(widths.get(cell.column, 0.0), width)
     for column, width in widths.items():
-        sheet.column_dimensions[get_column_letter(column)].width = min(width + 2, MAX_COLUMN_WIDTH)
+        letter = get_column_letter(column)
+        sheet.column_dimensions[letter].width = min(round(width + 3, 1), MAX_COLUMN_WIDTH)
+
+
+def _display_width(text: str) -> float:
+    """Approximate width in Excel character units. Thai vowel and tone marks
+    above or below a consonant take no width of their own."""
+    return float(sum(0 if unicodedata.combining(ch) else 1 for ch in text))
 
 
 def _bold_row(sheet: Worksheet, row: int) -> None:
+    """Subtotal / total row."""
     for cell in sheet[row]:
         cell.font = _BOLD
+        cell.fill = _TOTAL_FILL
 
 
 def _m(length_mm: int | None) -> float | None:

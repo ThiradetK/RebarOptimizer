@@ -98,6 +98,42 @@ def check_stock_text(text: str) -> tuple[tuple[int, ...] | None, list[str]]:
     return lengths, []
 
 
+MAX_VISIBLE_SIZE_ROWS = 8
+MAX_VISIBLE_COUNT_ROWS = 8
+MAX_VISIBLE_WARNING_ROWS = 4
+
+
+def fit_table_height(table: QTableWidget, max_rows: int) -> None:
+    """Show every row up to ``max_rows``; scroll beyond that."""
+    rows = max(1, min(table.rowCount(), max_rows))
+    row_height = table.verticalHeader().defaultSectionSize()
+    if table.rowCount():
+        row_height = table.rowHeight(0)
+    height = table.horizontalHeader().height() + rows * row_height + 2 * table.frameWidth()
+    table.setFixedHeight(height + 2)
+
+
+def fit_list_height(widget: QListWidget, max_rows: int) -> None:
+    """Size a list to its items (word-wrapped ones included) up to ``max_rows`` lines."""
+    widget.doItemsLayout()
+    heights = [widget.sizeHintForRow(i) for i in range(widget.count())]
+    line = max(heights[:1] or [widget.fontMetrics().height() + 4])
+    content = sum(heights) if heights else line
+    widget.setFixedHeight(min(content, line * max_rows) + 2 * widget.frameWidth() + 4)
+
+
+def result_source_text(outcome: PlanOutcome, computed_at: datetime) -> str:
+    """Which input and settings the shown result belongs to."""
+    settings = outcome.plan.settings
+    return GUI_TEXT["result_source"].format(
+        name=outcome.source.path.name,
+        stocks=format_stock_text(sorted(settings.stock_lengths_mm)),
+        mode=th.STOCK_MODE_LABELS[settings.stock_mode],
+        kerf=settings.kerf_mm,
+        time=computed_at.strftime("%H:%M"),
+    )
+
+
 def format_stock_text(lengths_mm: Sequence[int]) -> str:
     """``(10000, 12500)`` -> ``"10, 12.5"`` (duplicates already removed by the parser)."""
     return ", ".join(f"{length / 1000:g}" for length in lengths_mm)
@@ -338,6 +374,12 @@ class MainWindow(QMainWindow):
         banner_layout.addWidget(self.unplaced_label)
         layout.addWidget(self.unplaced_banner)
 
+        self.source_label = QLabel()
+        self.source_label.setObjectName("muted")
+        self.source_label.setWordWrap(True)
+        self.source_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.source_label)
+
         self.summary_card = QFrame()
         self.summary_card.setObjectName("summaryCard")
         metrics = QGridLayout(self.summary_card)
@@ -366,7 +408,7 @@ class MainWindow(QMainWindow):
         self.size_table.verticalHeader().setVisible(False)
         self.size_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.size_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.size_table.setMaximumHeight(150)
+        self.size_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         layout.addWidget(self.size_table)
 
         counts_header = QHBoxLayout()
@@ -378,7 +420,6 @@ class MainWindow(QMainWindow):
         counts_header.addWidget(self.copy_counts_button)
         layout.addLayout(counts_header)
         self.bar_counts_list = QListWidget()
-        self.bar_counts_list.setMaximumHeight(120)
         layout.addWidget(self.bar_counts_list)
 
         self.preview_tabs = QTabWidget()
@@ -390,7 +431,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.warnings_title)
         self.warnings_list = QListWidget()
         self.warnings_list.setWordWrap(True)
-        self.warnings_list.setMaximumHeight(96)
         layout.addWidget(self.warnings_list)
 
         save_row = QHBoxLayout()
@@ -505,8 +545,16 @@ class MainWindow(QMainWindow):
             time_limit_s=self.time_limit_spin.value(),
         )
 
+    def clear_results(self) -> None:
+        """Forget the shown result so it can never be saved for another input."""
+        self._outcome = None
+        self._last_saved = None
+        self.saved_label.clear()
+        self._show_results(None)
+
     def clear_form(self) -> None:
         """Reset the form to defaults; only ever triggered by the user."""
+        self.clear_results()
         self.input_edit.clear()
         self._user = UserSettings(
             window_geometry=self._user.window_geometry,
@@ -529,6 +577,8 @@ class MainWindow(QMainWindow):
             if not name:
                 return
             path = Path(name)
+        if str(path) != self.input_edit.text().strip():
+            self.clear_results()
         self.input_edit.setText(str(path))
         self._user.last_input_dir = str(path.parent)
 
@@ -562,6 +612,8 @@ class MainWindow(QMainWindow):
             return
         path = Path(self.input_edit.text().strip())
         self.save_user_settings()
+        # A new run replaces the old result even if it fails or is cancelled.
+        self.clear_results()
         self.log_view.clear()
         self._log(GUI_TEXT["log_started"].format(path=path))
         animations.animate_progress(self.progress_bar, 0)
@@ -638,6 +690,7 @@ class MainWindow(QMainWindow):
         has = outcome is not None
         self.empty_label.setVisible(not has)
         result_widgets = (
+            self.source_label,
             self.summary_card,
             self.size_table,
             self.bar_counts_title,
@@ -660,6 +713,7 @@ class MainWindow(QMainWindow):
         if outcome is None:
             return
         plan = outcome.plan
+        self.source_label.setText(result_source_text(outcome, datetime.now()))
         totals = plan_totals(plan)
         values = self.metric_values
         stock_text = GUI_TEXT["metres"].format(value=format_metres(totals.stock_mm))
@@ -721,6 +775,7 @@ class MainWindow(QMainWindow):
                 if column == 4 and size_plan.groups:
                     item.setToolTip(th.STATUS_LABELS[size_plan.status])
                 self.size_table.setItem(row, column, item)
+        fit_table_height(self.size_table, MAX_VISIBLE_SIZE_ROWS)
 
         self.bar_counts_list.clear()
         self.bar_counts_list.addItems(
@@ -730,12 +785,14 @@ class MainWindow(QMainWindow):
             ]
             or [th.NONE_TEXT]
         )
+        fit_list_height(self.bar_counts_list, MAX_VISIBLE_COUNT_ROWS)
 
         self._show_previews(plan)
 
         self.warnings_list.clear()
         messages = [th.format_issue(i) for i in (*outcome.source.warnings, *plan.issues)]
         self.warnings_list.addItems(messages or [th.NONE_TEXT])
+        fit_list_height(self.warnings_list, MAX_VISIBLE_WARNING_ROWS)
 
     def copy_bar_counts(self) -> None:
         """Copy the per-size, per-length lines, e.g. to paste into an order."""

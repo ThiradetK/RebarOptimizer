@@ -126,7 +126,7 @@ PALETTE_LIGHT = (
     "#7ec0f2",
     "#e59ae0",
     "#d9b98c",
-    "#a3b3c9",
+    "#e0796b",
 )
 PALETTE_DARK = (
     "#4f78c4",
@@ -140,7 +140,7 @@ PALETTE_DARK = (
     "#4b90c2",
     "#b26aad",
     "#a6875c",
-    "#71819a",
+    "#b04a3d",
 )
 
 

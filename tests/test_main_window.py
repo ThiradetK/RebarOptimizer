@@ -260,3 +260,50 @@ def test_template_button_fills_the_input(window: MainWindow, tmp_path: Path) -> 
     window.create_template(target)
     assert target.is_file()
     assert window.input_edit.text() == str(target)
+
+
+# --- stale results (never save a result for another input) ------------------------------
+
+
+def test_result_is_cleared_on_new_file_failed_run_and_clear(
+    qtbot: QtBot, window: MainWindow, tmp_path: Path, make_xlsx: MakeXlsx
+) -> None:
+    template = write_template(tmp_path / "t.xlsx")
+    bad = make_xlsx([["DB12", 1, "x", 1]])
+
+    def computed() -> None:
+        window.choose_input(template)
+        compute(qtbot, window)
+        assert window.save_button.isEnabled()
+        assert window.summary_card.isVisible()
+        assert "t.xlsx" in window.source_label.text()
+
+    computed()
+    window.choose_input(template)  # same file again: result kept
+    assert window.save_button.isEnabled()
+    window.choose_input(bad)
+    assert not window.save_button.isEnabled()
+    assert not window.summary_card.isVisible() and window.empty_label.isVisible()
+
+    computed()
+    window.choose_input(bad)
+    compute(qtbot, window)  # fails in the reader
+    assert not window.save_button.isEnabled()
+    assert window.save_result(tmp_path / "never.xlsx") is False
+    assert not (tmp_path / "never.xlsx").exists()
+
+    computed()
+    window.clear_form()
+    assert not window.save_button.isEnabled()
+
+
+def test_size_table_shows_every_size_without_scrolling(
+    qtbot: QtBot, window: MainWindow, make_xlsx: MakeXlsx
+) -> None:
+    sizes = ["DB10", "DB12", "DB16", "DB20", "DB25", "RB9"]
+    window.choose_input(make_xlsx([[s, i + 1, 3.0, 2] for i, s in enumerate(sizes)]))
+    compute(qtbot, window)
+    assert window.size_table.rowCount() == 6
+    qtbot.waitUntil(lambda: window.size_table.verticalScrollBar().maximum() == 0, timeout=2000)
+    count_bar = window.bar_counts_list.verticalScrollBar()
+    assert count_bar.maximum() == 0

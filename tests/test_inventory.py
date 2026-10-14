@@ -12,7 +12,12 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from rebar_optimizer.cli import EXIT_OK, main
-from rebar_optimizer.domain.errors import InputValidationError, InvariantViolation, IssueCode
+from rebar_optimizer.domain.errors import (
+    InputValidationError,
+    InvariantViolation,
+    Issue,
+    IssueCode,
+)
 from rebar_optimizer.domain.models import (
     BarGroup,
     CuttingPlan,
@@ -435,3 +440,10 @@ def test_format_metres_short() -> None:
         "3.505",
         "0.5",
     ]
+
+
+def test_pattern_limit_warning_does_not_claim_a_status() -> None:
+    message = th.format_issue(
+        Issue.warning(IssueCode.PATTERN_LIMIT_EXCEEDED, size="DB12", max_patterns=5)
+    )
+    assert "HEURISTIC" not in message and "gap" in message
