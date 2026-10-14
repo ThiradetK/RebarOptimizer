@@ -9,6 +9,12 @@
    early, Farley's bound ``z_LP * min_S(S / best_S)`` is used instead, which
    is valid at every iteration.
 4. CP-SAT solves the integer problem over the generated patterns -> HEURISTIC.
+
+With inventory (phase 8) the LP treats every inventory length as unlimited
+stock. That relaxes the problem, so the LP bound on *total* stock stays valid,
+and ``bound - total inventory length`` bounds the purchased length. Each column
+then becomes a pattern on new stock and/or on inventory of its length, and the
+integer step enforces availability (``solve_patterns``).
 """
 
 from __future__ import annotations
@@ -16,16 +22,16 @@ from __future__ import annotations
 import logging
 import math
 import time
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, replace
 
 import numpy as np
 from ortools.linear_solver import pywraplp
 
-from rebar_optimizer.domain.models import SolveStatus
+from rebar_optimizer.domain.models import SolveStatus, StockSource
 from rebar_optimizer.services.cancel import CancelToken, check_cancelled
 from rebar_optimizer.solver import kerf
-from rebar_optimizer.solver.base import Demand, RawBar, SolveResult
+from rebar_optimizer.solver.base import NO_INVENTORY, Demand, Inventory, RawBar, SolveResult
 from rebar_optimizer.solver.ilp import IlpOptions, solve_patterns
 from rebar_optimizer.solver.patterns import Pattern, PatternSet, pattern_of
 
@@ -94,6 +100,8 @@ class _MasterLp:
         self.columns: dict[Pattern, None] = {}
 
     def add(self, pattern: Pattern) -> bool:
+        # The LP only sees lengths; the source is decided in ``_integer_patterns``.
+        pattern = replace(pattern, source=StockSource.NEW)
         if pattern in self.columns:
             return False
         self.columns[pattern] = None
@@ -169,15 +177,19 @@ def solve_colgen(
     *,
     initial_bars: Sequence[RawBar] = (),
     cancel: CancelToken | None = None,
+    inventory: Inventory = NO_INVENTORY,
 ) -> SolveResult | None:
     """Column generation + CP-SAT over the generated columns.
 
     The result's status is ``HEURISTIC``; ``lower_bound_mm`` comes from the LP
-    and is valid for the whole problem. ``None`` if CP-SAT found nothing.
+    and bounds the purchased length of the whole problem. ``None`` if CP-SAT
+    found nothing.
     """
     started = time.monotonic()
     lengths = tuple(sorted(demand, reverse=True))
-    stocks = sorted(stock_lengths_mm)
+    inventory = {s: n for s, n in inventory.items() if n > 0}
+    new_stocks = sorted(stock_lengths_mm)
+    stocks = sorted(set(new_stocks) | set(inventory))
     master = _MasterLp(lengths, demand)
     for pattern in _initial_columns(lengths, stocks, kerf_mm, initial_bars):
         master.add(pattern)
@@ -193,6 +205,7 @@ def solve_colgen(
     )
     divisor = math.gcd(*stocks)
     bound_mm = math.ceil(lower_bound / divisor - 1e-6) * divisor
+    bound_mm = max(0, bound_mm - sum(s * n for s, n in inventory.items()))
     logger.info(
         "column generation: %d iterations, %d columns, LP bound %.1f mm (%s)",
         iterations,
@@ -201,7 +214,15 @@ def solve_colgen(
         "converged" if converged else "stopped early, Farley bound",
     )
 
-    pattern_set = PatternSet(lengths=lengths, patterns=tuple(master.columns))
+    patterns = _integer_patterns(
+        master.columns,
+        lengths,
+        new_stocks,
+        inventory=inventory,
+        kerf_mm=kerf_mm,
+        initial_bars=initial_bars,
+    )
+    pattern_set = PatternSet(lengths=lengths, patterns=patterns)
     remaining = max(0.5, options.time_limit_s - (time.monotonic() - started))
     result = solve_patterns(
         demand,
@@ -209,7 +230,30 @@ def solve_colgen(
         IlpOptions(remaining, options.random_seed, options.num_workers),
         hint=initial_bars,
         cancel=cancel,
+        inventory=inventory,
     )
     if result is None:
         return None
     return SolveResult(bars=result.bars, status=SolveStatus.HEURISTIC, lower_bound_mm=bound_mm)
+
+
+def _integer_patterns(
+    columns: Iterable[Pattern],
+    lengths: Sequence[int],
+    new_stocks: Sequence[int],
+    *,
+    inventory: Inventory,
+    kerf_mm: int,
+    initial_bars: Sequence[RawBar],
+) -> tuple[Pattern, ...]:
+    """LP columns as patterns on each source that has their length, plus the
+    initial bars and single pieces on new stock (always feasible)."""
+    found: dict[Pattern, None] = {}
+    for column in columns:
+        if column.stock_length_mm in new_stocks:
+            found[column] = None
+        if column.stock_length_mm in inventory:
+            found[replace(column, source=StockSource.INVENTORY)] = None
+    for column in _initial_columns(lengths, new_stocks, kerf_mm, initial_bars):
+        found.setdefault(column, None)
+    return tuple(found)

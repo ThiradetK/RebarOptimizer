@@ -18,12 +18,12 @@ def test_expand_longest_first() -> None:
 
 def test_best_fit_picks_the_tightest_open_bar() -> None:
     # 6 -> bar0 (free 4); 5 -> new bar1 (free 5); 4 -> bar0 (tightest that fits)
-    assert best_fit_decreasing([6000, 5000, 4000], 10000, 0) == [[6000, 4000], [5000]]
+    assert best_fit_decreasing([6000, 5000, 4000], 10000, 0)[0] == [[6000, 4000], [5000]]
 
 
 def test_best_fit_respects_kerf() -> None:
     # 6000 + 4000 + one kerf > 10000, so 4000 cannot join 6000 when k = 1
-    assert best_fit_decreasing([6000, 4000], 10000, 1) == [[6000], [4000]]
+    assert best_fit_decreasing([6000, 4000], 10000, 1)[0] == [[6000], [4000]]
 
 
 def test_best_fit_rejects_too_long_piece() -> None:

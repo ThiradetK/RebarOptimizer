@@ -1,5 +1,10 @@
 """Per-size orchestration (5.1): split oversize pieces, solve, post-process,
-map lengths back to piece numbers, group identical bars and verify."""
+map lengths back to piece numbers, group identical bars and verify.
+
+Inventory (phase 8) is passed per size. Plans are compared by ``stock_cost``:
+purchased length first, then inventory length used. Without inventory that is
+the plain total stock length of D2.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +13,7 @@ import math
 import re
 import time
 from collections import Counter, deque
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from rebar_optimizer.domain.errors import Issue, IssueCode
@@ -17,10 +22,12 @@ from rebar_optimizer.domain.models import (
     BarGroup,
     Cut,
     CuttingPlan,
+    InventoryStock,
     Piece,
     Remnant,
     SizePlan,
     SolveStatus,
+    StockSource,
     Unplaced,
 )
 from rebar_optimizer.domain.settings import OptimizerSettings, StockMode
@@ -35,7 +42,14 @@ from rebar_optimizer.services.invariants import verify_plan
 from rebar_optimizer.services.postprocess import classify_remnant, postprocess
 from rebar_optimizer.services.summary import bar_detail
 from rebar_optimizer.solver import kerf
-from rebar_optimizer.solver.base import Demand, RawBar, total_stock_mm
+from rebar_optimizer.solver.base import (
+    NO_INVENTORY,
+    Demand,
+    Inventory,
+    RawBar,
+    stock_cost,
+    total_stock_mm,
+)
 from rebar_optimizer.solver.colgen import solve_colgen
 from rebar_optimizer.solver.greedy import GreedySolver
 from rebar_optimizer.solver.ilp import IlpOptions, solve_patterns
@@ -62,10 +76,12 @@ def plan(
     settings: OptimizerSettings,
     on_progress: ProgressCallback | None = None,
     cancel: CancelToken | None = None,
+    inventory: Sequence[InventoryStock] = (),
 ) -> CuttingPlan:
     """Plan every size in input order. Raises ``SettingsError``, ``Cancelled``
-    or ``InvariantViolation``."""
+    or ``InvariantViolation``. Inventory of sizes without pieces is ignored."""
     settings.validate()
+    inventory_by_size = inventory_per_size(inventory)
     sizes = list(dict.fromkeys(p.size for p in pieces))
     size_plans: list[SizePlan] = []
     issues: list[Issue] = []
@@ -74,7 +90,16 @@ def plan(
         if on_progress is not None:
             on_progress(ProgressEvent(ProgressKind.SIZE_STARTED, size, index, len(sizes)))
         size_pieces = [p for p in pieces if p.size == size]
-        size_plans.append(plan_size(size, size_pieces, settings, cancel, issues))
+        size_plans.append(
+            plan_size(
+                size,
+                size_pieces,
+                settings,
+                cancel,
+                issues,
+                inventory=inventory_by_size.get(size, NO_INVENTORY),
+            )
+        )
         if on_progress is not None:
             on_progress(ProgressEvent(ProgressKind.SIZE_FINISHED, size, index, len(sizes)))
 
@@ -88,7 +113,16 @@ def plan(
             )
         )
     result = CuttingPlan(sizes=tuple(size_plans), settings=settings, issues=tuple(issues))
-    verify_plan(pieces, result, settings)
+    verify_plan(pieces, result, settings, inventory)
+    return result
+
+
+def inventory_per_size(inventory: Sequence[InventoryStock]) -> dict[str, dict[int, int]]:
+    """``{size: {length_mm: bars available}}``; repeated lengths add up."""
+    result: dict[str, dict[int, int]] = {}
+    for item in inventory:
+        lengths = result.setdefault(item.size, {})
+        lengths[item.length_mm] = lengths.get(item.length_mm, 0) + item.quantity
     return result
 
 
@@ -105,9 +139,18 @@ def plan_size(
     settings: OptimizerSettings,
     cancel: CancelToken | None = None,
     issues: list[Issue] | None = None,
+    *,
+    inventory: Inventory = NO_INVENTORY,
 ) -> SizePlan:
-    """Plan one size. Warnings (pattern limit, time limit) go to ``issues``."""
+    """Plan one size. Warnings (pattern limit, time limit) go to ``issues``.
+
+    Inventory is usable in both modes; single-length mode restricts only the
+    purchased stock (phase 8). Pieces longer than the longest *new* stock are
+    unplaced even if an inventory bar is longer: inventory is limited, so only
+    new stock guarantees that every remaining piece can be placed.
+    """
     issues = [] if issues is None else issues
+    inventory = {length: n for length, n in inventory.items() if n > 0}
     stocks = tuple(sorted(settings.stock_lengths_mm))
     longest_stock = stocks[-1]
     unplaced = tuple(
@@ -136,7 +179,7 @@ def plan_size(
 
     candidate_sets: list[tuple[int, ...]]
     if settings.stock_mode is StockMode.SINGLE:
-        # D4: only lengths that hold the longest remaining piece; never drop pieces.
+        # D4: only new lengths that hold the longest remaining piece; never drop pieces.
         candidate_sets = [(s,) for s in stocks if s >= max(demand)]
     else:
         candidate_sets = [stocks]
@@ -156,26 +199,29 @@ def plan_size(
                     time_limit_s=time_limit,
                     cancel=cancel,
                     issues=issues,
+                    inventory=inventory,
                 ),
                 stock_set,
             )
         )
-    best, best_set = min(solved_sets, key=lambda item: total_stock_mm(item[0].bars))
-    best_total = total_stock_mm(best.bars)
+    best, best_set = min(solved_sets, key=lambda item: stock_cost(item[0].bars))
+    best_new, best_inventory = stock_cost(best.bars)
     # The size's bound must hold for every candidate length, not just the chosen one.
     lower_bound = min(solved.lower_bound_mm for solved, _ in solved_sets)
     status = best.status
-    if status is SolveStatus.OPTIMAL and lower_bound < best_total:
+    if status is SolveStatus.OPTIMAL and lower_bound < best_new:
         status = SolveStatus.FEASIBLE
     logger.info(
-        "size %s: %d bars, %d mm stock, status %s",
+        "size %s: %d bars, %d mm stock (%d mm from inventory), status %s",
         size,
         len(best.bars),
         total_stock_mm(best.bars),
+        best_inventory,
         best.status,
     )
 
     groups = assign_numbers(size, best.bars, placeable)
+    buys_new = any(not bar.is_inventory for bar in best.bars)
     return SizePlan(
         size=size,
         kerf_mm=settings.kerf_mm,
@@ -185,7 +231,9 @@ def plan_size(
         piece_lengths_mm=piece_lengths,
         status=status,
         lower_bound_mm=lower_bound,
-        single_stock_mm=best_set[0] if settings.stock_mode is StockMode.SINGLE else None,
+        single_stock_mm=(
+            best_set[0] if settings.stock_mode is StockMode.SINGLE and buys_new else None
+        ),
     )
 
 
@@ -198,23 +246,31 @@ def _solve_lengths(
     time_limit_s: float,
     cancel: CancelToken | None,
     issues: list[Issue],
+    inventory: Inventory = NO_INVENTORY,
 ) -> _Solved:
-    """Greedy first, then the ILP; keep the shorter total (D8).
+    """Greedy first, then the ILP; keep the lower ``stock_cost`` (D8).
 
     ``time_limit_s`` covers this whole call; CP-SAT gets what is left.
+    ``lower_bound_mm`` bounds the purchased length.
     """
     started = time.monotonic()
     kerf_mm = settings.kerf_mm
-    greedy = GreedySolver().solve(demand, stock_set, kerf_mm, cancel)
-    greedy_bars = postprocess(greedy.bars, demand, stock_set, kerf_mm, cancel)
-    greedy_total = total_stock_mm(greedy_bars)
-    bound = simple_lower_bound(demand, stock_set, kerf_mm)
-    if greedy_total <= bound:
+    greedy = GreedySolver().solve(demand, stock_set, kerf_mm, cancel, inventory=inventory)
+    greedy_bars = postprocess(greedy.bars, demand, stock_set, kerf_mm, cancel, inventory=inventory)
+    greedy_cost = stock_cost(greedy_bars)
+    bound = simple_lower_bound(demand, stock_set, kerf_mm, inventory)
+    if _meets_bound(greedy_cost, bound):
         logger.info("size %s: greedy meets the lower bound, ILP skipped", size)
         return _Solved(bars=greedy_bars, status=SolveStatus.GREEDY, lower_bound_mm=bound)
 
     pattern_set = enumerate_patterns(
-        demand, stock_set, kerf_mm, settings.max_patterns, extra_bars=greedy_bars, cancel=cancel
+        demand,
+        stock_set,
+        kerf_mm,
+        settings.max_patterns,
+        extra_bars=greedy_bars,
+        cancel=cancel,
+        inventory=inventory,
     )
     options = IlpOptions(
         time_limit_s=max(MIN_ILP_TIME_S, time_limit_s - (time.monotonic() - started)),
@@ -229,42 +285,69 @@ def _solve_lengths(
             )
         )
         result = solve_colgen(
-            demand, stock_set, kerf_mm, options, initial_bars=greedy_bars, cancel=cancel
+            demand,
+            stock_set,
+            kerf_mm,
+            options,
+            initial_bars=greedy_bars,
+            cancel=cancel,
+            inventory=inventory,
         )
     else:
-        result = solve_patterns(demand, pattern_set, options, hint=greedy_bars, cancel=cancel)
+        result = solve_patterns(
+            demand, pattern_set, options, hint=greedy_bars, cancel=cancel, inventory=inventory
+        )
     if result is None:
         issues.append(Issue.warning(IssueCode.TIME_LIMIT_HIT, size=size, seconds=time_limit_s))
         return _Solved(bars=greedy_bars, status=SolveStatus.GREEDY, lower_bound_mm=bound)
 
     if result.lower_bound_mm is not None:
         bound = max(bound, result.lower_bound_mm)
-    ilp_bars = postprocess(result.bars, demand, stock_set, kerf_mm, cancel)
-    ilp_total = total_stock_mm(ilp_bars)
+    ilp_bars = postprocess(result.bars, demand, stock_set, kerf_mm, cancel, inventory=inventory)
+    ilp_cost = stock_cost(ilp_bars)
     status = result.status
-    if ilp_total <= bound:
+    if _meets_bound(ilp_cost, bound):
         # Post-processing (removing over-cuts, downsizing) reached the proven bound.
         status = SolveStatus.OPTIMAL
     if status is SolveStatus.FEASIBLE:
         issues.append(Issue.warning(IssueCode.TIME_LIMIT_HIT, size=size, seconds=time_limit_s))
-    if ilp_total <= greedy_total:
+    if ilp_cost <= greedy_cost:
         return _Solved(bars=ilp_bars, status=status, lower_bound_mm=bound)
     return _Solved(bars=greedy_bars, status=SolveStatus.GREEDY, lower_bound_mm=bound)
 
 
-def simple_lower_bound(demand: Demand, stock_set: Sequence[int], kerf_mm: int) -> int:
-    """A cheap valid bound, used when the ILP is skipped or gives a weaker one.
+def _meets_bound(cost: tuple[int, int], bound: int) -> bool:
+    """Provably optimal: purchase at the bound and no inventory left to economize on."""
+    new, inventory = cost
+    return new <= bound and inventory == 0
 
-    Total stock is at least the total piece length. With a single stock
-    length ``S`` at least ``ceil(sum(l + k) / (S + k))`` bars are needed.
+
+def simple_lower_bound(
+    demand: Demand,
+    stock_set: Sequence[int],
+    kerf_mm: int,
+    inventory: Mapping[int, int] = NO_INVENTORY,
+) -> int:
+    """A cheap valid bound on the purchased length, used when the ILP is
+    skipped or gives a weaker one.
+
+    Stock is at least the total piece length, and inventory supplies at most
+    its total length. With a single new length ``S``, the knapsack weight
+    ``sum(l + k)`` left after inventory (capacity ``S + k`` per bar) needs at
+    least ``ceil(left / (S + k))`` new bars.
     """
     pieces_total = sum(length * count for length, count in demand.items())
+    inventory_total = sum(length * count for length, count in inventory.items())
+    bound = max(0, pieces_total - inventory_total)
     if len(stock_set) != 1:
-        return pieces_total
+        return bound
     stock = stock_set[0]
     weight = sum(kerf.item_size(length, kerf_mm) * count for length, count in demand.items())
-    bars = math.ceil(weight / kerf.capacity(stock, kerf_mm))
-    return max(pieces_total, bars * stock)
+    inventory_capacity = sum(
+        kerf.capacity(length, kerf_mm) * count for length, count in inventory.items()
+    )
+    bars = math.ceil(max(0, weight - inventory_capacity) / kerf.capacity(stock, kerf_mm))
+    return max(bound, bars * stock)
 
 
 def assign_numbers(
@@ -279,7 +362,11 @@ def assign_numbers(
     for piece in sorted(pieces, key=lambda p: natural_key(p.no)):
         queues.setdefault(piece.length_mm, deque()).append((piece.no, piece.quantity))
 
-    ordered = sorted(bars, key=lambda b: (b.stock_length_mm, b.lengths), reverse=True)
+    ordered = sorted(
+        bars,
+        key=lambda b: (b.source is StockSource.NEW, b.stock_length_mm, b.lengths),
+        reverse=True,
+    )
     counts: dict[Bar, int] = {}
     for raw in ordered:
         cuts: list[Cut] = []
@@ -292,7 +379,9 @@ def assign_numbers(
             else:
                 queue.popleft()
         cuts.sort(key=lambda c: (-c.length_mm, natural_key(c.no)))
-        bar = Bar(size=size, stock_length_mm=raw.stock_length_mm, cuts=tuple(cuts))
+        bar = Bar(
+            size=size, stock_length_mm=raw.stock_length_mm, cuts=tuple(cuts), source=raw.source
+        )
         counts[bar] = counts.get(bar, 0) + 1
     leftover = {length: list(q) for length, q in queues.items() if q}
     if leftover:  # pragma: no cover - verify_plan would also catch this

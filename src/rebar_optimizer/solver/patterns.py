@@ -6,6 +6,9 @@ still fits), and a pattern is skipped on a stock length when the same pieces fit
 a shorter allowed length (that shorter pattern is generated instead). Restricting
 the ILP to these patterns loses nothing: any plan can be padded to maximal
 patterns (over-cutting, removed later) without using more stock.
+
+Inventory lengths (phase 8) get their own patterns. They are never skipped in
+favour of a shorter stock: inventory is limited, so the shorter bar may run out.
 """
 
 from __future__ import annotations
@@ -13,9 +16,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 
+from rebar_optimizer.domain.models import StockSource
 from rebar_optimizer.services.cancel import CancelToken, check_cancelled
 from rebar_optimizer.solver import kerf
-from rebar_optimizer.solver.base import Demand, RawBar
+from rebar_optimizer.solver.base import NO_INVENTORY, Demand, Inventory, RawBar
 
 _CANCEL_CHECK_EVERY = 4096
 
@@ -25,6 +29,7 @@ class Pattern:
     stock_length_mm: int
     counts: tuple[int, ...]
     """Pieces per length, aligned with ``PatternSet.lengths``."""
+    source: StockSource = StockSource.NEW
 
     def lengths(self, lengths: Sequence[int]) -> list[int]:
         return [length for length, n in zip(lengths, self.counts, strict=True) for _ in range(n)]
@@ -37,7 +42,7 @@ class PatternSet:
     patterns: tuple[Pattern, ...]
 
     def to_raw_bar(self, pattern: Pattern) -> RawBar:
-        return RawBar.of(pattern.stock_length_mm, pattern.lengths(self.lengths))
+        return RawBar.of(pattern.stock_length_mm, pattern.lengths(self.lengths), pattern.source)
 
 
 def iter_maximal_patterns(
@@ -45,12 +50,29 @@ def iter_maximal_patterns(
     stock_lengths_mm: Sequence[int],
     kerf_mm: int,
     cancel: CancelToken | None = None,
+    inventory: Inventory = NO_INVENTORY,
 ) -> Iterator[Pattern]:
-    """Yield every maximal, non-dominated pattern (lazily)."""
+    """Yield every maximal, non-dominated pattern (lazily): new stock first,
+    then each inventory length."""
+    stocks = sorted(stock_lengths_mm)
+    jobs: list[tuple[int, StockSource, int]] = []  # (stock, source, shorter capacity)
+    for stock_index, stock in enumerate(stocks):
+        # Pieces fitting the next shorter stock belong to that stock instead.
+        shorter = kerf.capacity(stocks[stock_index - 1], kerf_mm) if stock_index else -1
+        jobs.append((stock, StockSource.NEW, shorter))
+    jobs.extend((length, StockSource.INVENTORY, -1) for length in sorted(inventory))
+    yield from _iter_patterns(demand, jobs, kerf_mm, cancel)
+
+
+def _iter_patterns(
+    demand: Demand,
+    jobs: Sequence[tuple[int, StockSource, int]],
+    kerf_mm: int,
+    cancel: CancelToken | None,
+) -> Iterator[Pattern]:
     lengths = tuple(sorted(demand, reverse=True))
     caps = tuple(demand[length] for length in lengths)
     weights = tuple(kerf.item_size(length, kerf_mm) for length in lengths)
-    stocks = sorted(stock_lengths_mm)
     n = len(lengths)
     visited = 0
 
@@ -60,10 +82,8 @@ def iter_maximal_patterns(
         suffix_fill[i] = suffix_fill[i + 1] + caps[i] * weights[i]
     no_limit = 1 << 62
 
-    for stock_index, stock in enumerate(stocks):
+    for stock, source, shorter_capacity in jobs:
         capacity = kerf.capacity(stock, kerf_mm)
-        # Pieces fitting the next shorter stock belong to that stock instead.
-        shorter_capacity = kerf.capacity(stocks[stock_index - 1], kerf_mm) if stock_index else -1
         counts = [0] * n
         # Iterative DFS. State: depth, remaining capacity, next count to try at
         # this depth (-1 = start at the maximum), smallest weight of an earlier
@@ -84,7 +104,7 @@ def iter_maximal_patterns(
                     and used > shorter_capacity
                     and _is_maximal(counts, caps, weights, remaining)
                 ):
-                    yield Pattern(stock, tuple(counts))
+                    yield Pattern(stock, tuple(counts), source)
                 continue
             most = min(caps[depth], remaining // weights[depth])
             if choice == -1:
@@ -112,12 +132,13 @@ def enumerate_patterns(
     *,
     extra_bars: Iterable[RawBar] = (),
     cancel: CancelToken | None = None,
+    inventory: Inventory = NO_INVENTORY,
 ) -> PatternSet | None:
     """All maximal patterns plus the patterns of ``extra_bars`` (e.g. the greedy
     plan, so the ILP can start from it). ``None`` if more than ``max_patterns``."""
     lengths = tuple(sorted(demand, reverse=True))
     found: dict[Pattern, None] = {}
-    for pattern in iter_maximal_patterns(demand, stock_lengths_mm, kerf_mm, cancel):
+    for pattern in iter_maximal_patterns(demand, stock_lengths_mm, kerf_mm, cancel, inventory):
         found[pattern] = None
         if len(found) > max_patterns:
             return None
@@ -131,4 +152,4 @@ def pattern_of(bar: RawBar, lengths: Sequence[int]) -> Pattern:
     counts = [0] * len(lengths)
     for length in bar.lengths:
         counts[index[length]] += 1
-    return Pattern(bar.stock_length_mm, tuple(counts))
+    return Pattern(bar.stock_length_mm, tuple(counts), bar.source)

@@ -10,20 +10,40 @@ from collections import Counter
 from collections.abc import Sequence
 
 from rebar_optimizer.domain.errors import InvariantViolation
-from rebar_optimizer.domain.models import CuttingPlan, Piece, PieceKey, SizePlan
+from rebar_optimizer.domain.models import (
+    CuttingPlan,
+    InventoryStock,
+    Piece,
+    PieceKey,
+    SizePlan,
+    StockSource,
+)
 from rebar_optimizer.domain.settings import OptimizerSettings, StockMode
 from rebar_optimizer.solver import kerf
 
 
-def verify_plan(pieces: Sequence[Piece], plan: CuttingPlan, settings: OptimizerSettings) -> None:
-    """Raise ``InvariantViolation`` on the first broken rule."""
+def verify_plan(
+    pieces: Sequence[Piece],
+    plan: CuttingPlan,
+    settings: OptimizerSettings,
+    inventory: Sequence[InventoryStock] = (),
+) -> None:
+    """Raise ``InvariantViolation`` on the first broken rule.
+
+    ``inventory`` is the input's ``Stock`` sheet (phase 8): inventory bars must
+    come from it and never exceed what is available.
+    """
     expected = {p.key: p for p in pieces}
+    available: Counter[tuple[str, int]] = Counter()
+    for item in inventory:
+        available[(item.size, item.length_mm)] += item.quantity
     _check_sizes(pieces, plan)
     _check_counts(expected, plan)
     allowed = set(settings.stock_lengths_mm)
     longest = max(allowed)
     for size_plan in plan.sizes:
         _check_bars(size_plan, settings, allowed)
+        _check_inventory(size_plan, available)
         _check_unplaced(size_plan, expected, longest)
         _check_totals(size_plan, expected)
 
@@ -74,7 +94,7 @@ def _check_counts(expected: dict[PieceKey, Piece], plan: CuttingPlan) -> None:
 
 
 def _check_bars(size_plan: SizePlan, settings: OptimizerSettings, allowed: set[int]) -> None:
-    """Rules 2 and 3: every bar fits, kerf accounting adds up, stock allowed."""
+    """Rules 2 and 3: every bar fits, kerf accounting adds up, new stock allowed."""
     if size_plan.kerf_mm != settings.kerf_mm:
         raise _fail(f"{size_plan.size}: kerf {size_plan.kerf_mm} != settings {settings.kerf_mm}")
     used_stocks: set[int] = set()
@@ -83,19 +103,37 @@ def _check_bars(size_plan: SizePlan, settings: OptimizerSettings, allowed: set[i
         lengths = [c.length_mm for c in bar.cuts]
         if not lengths:
             raise _fail(f"{size_plan.size}: empty bar")
-        if bar.stock_length_mm not in allowed:
+        if bar.source is StockSource.NEW and bar.stock_length_mm not in allowed:
             raise _fail(f"{size_plan.size}: stock {bar.stock_length_mm} not in {sorted(allowed)}")
         if not kerf.fits(lengths, bar.stock_length_mm, settings.kerf_mm):
             raise _fail(f"{size_plan.size}: {lengths} exceed {bar.stock_length_mm} mm")
         usage = kerf.bar_usage(lengths, bar.stock_length_mm, settings.kerf_mm)
         if usage.pieces_mm + usage.kerf_loss_mm + usage.remnant_mm != bar.stock_length_mm:
             raise _fail(f"{size_plan.size}: kerf accounting broken for {bar}")
-        used_stocks.add(bar.stock_length_mm)
-    if settings.stock_mode is StockMode.SINGLE and size_plan.groups:
+        if bar.source is StockSource.NEW:
+            used_stocks.add(bar.stock_length_mm)
+    # Single-length mode restricts purchased stock only (phase 8).
+    if settings.stock_mode is StockMode.SINGLE and used_stocks:
         if len(used_stocks) != 1:
             raise _fail(f"{size_plan.size}: single-length mode uses {sorted(used_stocks)}")
         if size_plan.single_stock_mm not in used_stocks:
             raise _fail(f"{size_plan.size}: chosen length {size_plan.single_stock_mm} unused")
+    elif size_plan.single_stock_mm is not None and not used_stocks:
+        raise _fail(f"{size_plan.size}: chosen length {size_plan.single_stock_mm} unused")
+
+
+def _check_inventory(size_plan: SizePlan, available: Counter[tuple[str, int]]) -> None:
+    """Rule 3 for inventory (phase 8): only bars the input holds, never more than it holds."""
+    used: Counter[int] = Counter()
+    for group in size_plan.groups:
+        if group.bar.source is StockSource.INVENTORY:
+            used[group.bar.stock_length_mm] += group.count
+    for length, count in used.items():
+        if count > available[(size_plan.size, length)]:
+            raise _fail(
+                f"{size_plan.size}: {count} inventory bars of {length} mm used, "
+                f"{available[(size_plan.size, length)]} available"
+            )
 
 
 def _check_unplaced(size_plan: SizePlan, expected: dict[PieceKey, Piece], longest: int) -> None:
@@ -132,7 +170,7 @@ def _check_totals(size_plan: SizePlan, expected: dict[PieceKey, Piece]) -> None:
             raise _fail(f"{size_plan.size}: remnant {remnant} longest cuttable should be {longest}")
 
     bound = size_plan.lower_bound_mm
-    if bound is not None and bound > size_plan.total_stock_mm:
+    if bound is not None and bound > size_plan.new_stock_mm:
         raise _fail(
-            f"{size_plan.size}: lower bound {bound} above result {size_plan.total_stock_mm}"
+            f"{size_plan.size}: lower bound {bound} above purchase {size_plan.new_stock_mm}"
         )

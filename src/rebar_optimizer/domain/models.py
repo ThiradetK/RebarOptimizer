@@ -49,6 +49,17 @@ class StockOption:
 
 
 @dataclass(frozen=True)
+class InventoryStock:
+    """Bars already on hand for one size (optional ``Stock`` sheet, phase 8)."""
+
+    size: str
+    length_mm: int
+    quantity: int
+    rows: tuple[int, ...]
+    """Excel row numbers of the ``Stock`` sheet this entry came from."""
+
+
+@dataclass(frozen=True)
 class Cut:
     """One piece cut from a bar."""
 
@@ -67,6 +78,8 @@ class Bar:
     size: str
     stock_length_mm: int
     cuts: tuple[Cut, ...]
+    source: StockSource = StockSource.NEW
+    """``INVENTORY`` bars come from the ``Stock`` sheet and are not purchased."""
 
     @property
     def used_length_mm(self) -> int:
@@ -127,8 +140,9 @@ class SizePlan:
     """Distinct input lengths of this size, shortest first (classifies remnants)."""
     status: SolveStatus
     lower_bound_mm: int | None
+    """Bound on the purchased (new) stock length; equals the total without inventory."""
     single_stock_mm: int | None = None
-    """The one stock length chosen in single-length mode, else ``None``."""
+    """The one new stock length chosen in single-length mode, else ``None``."""
 
     @property
     def bar_count(self) -> int:
@@ -139,13 +153,24 @@ class SizePlan:
         return sum(g.bar.stock_length_mm * g.count for g in self.groups)
 
     @property
+    def new_stock_mm(self) -> int:
+        """Stock to purchase: the primary objective (D2, phase 8)."""
+        return sum(
+            g.bar.stock_length_mm * g.count for g in self.groups if g.bar.source is StockSource.NEW
+        )
+
+    @property
+    def inventory_stock_mm(self) -> int:
+        return self.total_stock_mm - self.new_stock_mm
+
+    @property
     def total_pieces_mm(self) -> int:
         return sum(g.bar.used_length_mm * g.count for g in self.groups)
 
     @property
     def gap(self) -> float | None:
-        """``(result - bound) / result``, or ``None`` without a bound."""
-        total = self.total_stock_mm
+        """``(result - bound) / result`` on the purchased length, or ``None`` without a bound."""
+        total = self.new_stock_mm
         if self.lower_bound_mm is None or total == 0:
             return None if self.lower_bound_mm is None else 0.0
         return max(0.0, (total - self.lower_bound_mm) / total)
