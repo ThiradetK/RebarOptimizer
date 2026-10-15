@@ -13,7 +13,7 @@ import math
 import re
 import time
 from collections import Counter, deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from rebar_optimizer.domain.errors import Issue, IssueCode
@@ -36,6 +36,8 @@ from rebar_optimizer.services.cancel import (
     ProgressCallback,
     ProgressEvent,
     ProgressKind,
+    Stage,
+    StageCallback,
     check_cancelled,
 )
 from rebar_optimizer.services.invariants import verify_plan
@@ -98,6 +100,7 @@ def plan(
                 cancel,
                 issues,
                 inventory=inventory_by_size.get(size, NO_INVENTORY),
+                on_stage=_stage_reporter(on_progress, size, index, len(sizes)),
             )
         )
         if on_progress is not None:
@@ -117,6 +120,18 @@ def plan(
     )
     verify_plan(pieces, result, settings, inventory)
     return result
+
+
+def _stage_reporter(
+    on_progress: ProgressCallback | None, size: str, index: int, total: int
+) -> StageCallback | None:
+    if on_progress is None:
+        return None
+
+    def report(stage: Stage, step: int, steps: int) -> None:
+        on_progress(ProgressEvent(ProgressKind.STAGE, size, index, total, stage, step, steps))
+
+    return report
 
 
 def merge_size_issues(issues: Sequence[Issue]) -> list[Issue]:
@@ -170,8 +185,10 @@ def plan_size(
     issues: list[Issue] | None = None,
     *,
     inventory: Inventory = NO_INVENTORY,
+    on_stage: StageCallback | None = None,
 ) -> SizePlan:
-    """Plan one size. Warnings (pattern limit, time limit) go to ``issues``.
+    """Plan one size. Warnings (pattern limit, time limit) go to ``issues``;
+    ``on_stage`` hears about each step so long sizes still show progress.
 
     Inventory is usable in both modes; single-length mode restricts only the
     purchased stock (phase 8). Pieces longer than the longest *new* stock are
@@ -216,8 +233,13 @@ def plan_size(
     # Single-length mode shares the size's time limit equally between lengths (5.1.3).
     time_limit = settings.time_limit_s / len(candidate_sets)
     solved_sets = []
-    for stock_set in candidate_sets:
+    for step, stock_set in enumerate(candidate_sets):
         check_cancelled(cancel)
+
+        def report(stage: Stage, step: int = step) -> None:
+            if on_stage is not None:
+                on_stage(stage, step, len(candidate_sets))
+
         solved_sets.append(
             (
                 _solve_lengths(
@@ -229,6 +251,7 @@ def plan_size(
                     cancel=cancel,
                     issues=issues,
                     inventory=inventory,
+                    report=report,
                 ),
                 stock_set,
             )
@@ -249,6 +272,8 @@ def plan_size(
         best.status,
     )
 
+    if on_stage is not None:
+        on_stage(Stage.FINISH, 0, 1)
     groups = assign_numbers(size, best.bars, placeable)
     buys_new = any(not bar.is_inventory for bar in best.bars)
     return SizePlan(
@@ -276,6 +301,7 @@ def _solve_lengths(
     cancel: CancelToken | None,
     issues: list[Issue],
     inventory: Inventory = NO_INVENTORY,
+    report: Callable[[Stage], None] = lambda _: None,
 ) -> _Solved:
     """Greedy first, then the ILP; keep the lower ``stock_cost`` (D8).
 
@@ -284,7 +310,9 @@ def _solve_lengths(
     """
     started = time.monotonic()
     kerf_mm = settings.kerf_mm
+    report(Stage.GREEDY)
     greedy = GreedySolver().solve(demand, stock_set, kerf_mm, cancel, inventory=inventory)
+    report(Stage.IMPROVE)
     greedy_bars = postprocess(greedy.bars, demand, stock_set, kerf_mm, cancel, inventory=inventory)
     greedy_cost = stock_cost(greedy_bars)
     bound = simple_lower_bound(demand, stock_set, kerf_mm, inventory)
@@ -292,6 +320,7 @@ def _solve_lengths(
         logger.info("size %s: greedy meets the lower bound, ILP skipped", size)
         return _Solved(bars=greedy_bars, status=SolveStatus.GREEDY, lower_bound_mm=bound)
 
+    report(Stage.SEARCH)
     pattern_set = enumerate_patterns(
         demand,
         stock_set,

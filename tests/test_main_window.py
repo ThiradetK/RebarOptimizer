@@ -118,6 +118,9 @@ def test_successful_run_shows_results_and_saves(
     window.stock_edit.setText("10, 12")
     compute(qtbot, window)
     assert window.status_label.text() == GUI_TEXT["status_done"]
+    log = window.log_view.toPlainText()
+    for stage in ("จัดแผนเบื้องต้น", "ปรับแผนให้ใช้เศษ", "สรุปผล"):
+        assert stage in log
     assert window.size_table.rowCount() == 3
     counts = [window.bar_counts_list.item(i).text() for i in range(window.bar_counts_list.count())]
     assert counts and all(t.startswith("Size ") and t.endswith("เมตร") for t in counts)
@@ -191,6 +194,11 @@ def test_cancel(qtbot: QtBot, window: MainWindow, tmp_path: Path) -> None:
     assert window.cancel_button.isVisible()
     assert not window.stock_edit.isEnabled()  # form locked while computing
     qtbot.wait(1500)
+    # A long step shows which stage runs and how long it has taken so far.
+    assert "—" in window.status_label.text()
+    window._status_since -= 10  # pretend the current stage started 10 s ago
+    window._tick_status()
+    assert window.status_label.text().endswith("วินาที")
     window.cancel_button.click()
     qtbot.waitUntil(lambda: not window.is_running(), timeout=5_000)
     assert window.status_label.text() == GUI_TEXT["status_cancelled"]

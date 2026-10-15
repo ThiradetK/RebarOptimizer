@@ -39,7 +39,27 @@ def check_cancelled(token: CancelToken | None) -> None:
 
 class ProgressKind(StrEnum):
     SIZE_STARTED = "size_started"
+    STAGE = "stage"
+    """A step inside one size (see ``Stage``)."""
     SIZE_FINISHED = "size_finished"
+
+
+class Stage(StrEnum):
+    """Steps inside one size, in order. Long sizes otherwise show no progress."""
+
+    GREEDY = "greedy"
+    IMPROVE = "improve"
+    SEARCH = "search"
+    FINISH = "finish"
+
+
+STAGE_OFFSETS: dict[Stage, float] = {
+    Stage.GREEDY: 0.0,
+    Stage.IMPROVE: 0.05,
+    Stage.SEARCH: 0.15,
+    Stage.FINISH: 0.95,
+}
+"""Where each stage starts within a size, as a share of that size's progress."""
 
 
 @dataclass(frozen=True)
@@ -50,12 +70,33 @@ class ProgressEvent:
     """0-based position of ``size``."""
     total: int
     """Number of sizes."""
+    stage: Stage | None = None
+    """Set for ``ProgressKind.STAGE``."""
+    step: int = 0
+    """0-based stock length tried, in single-length mode (otherwise 0)."""
+    steps: int = 1
+    """Number of stock lengths tried for this size."""
 
     @property
     def fraction(self) -> float:
-        """Overall progress in ``[0, 1]``."""
-        done = self.index + (1 if self.kind is ProgressKind.SIZE_FINISHED else 0)
-        return done / self.total if self.total else 1.0
+        """Overall progress in ``[0, 1]``; never goes backwards within a run."""
+        if not self.total:
+            return 1.0
+        if self.kind is ProgressKind.SIZE_FINISHED:
+            within = 1.0
+        elif self.kind is ProgressKind.STAGE and self.stage is not None:
+            if self.stage is Stage.FINISH:
+                within = STAGE_OFFSETS[Stage.FINISH]
+            else:
+                share = STAGE_OFFSETS[Stage.FINISH] / max(self.steps, 1)
+                within = share * (
+                    self.step + STAGE_OFFSETS[self.stage] / STAGE_OFFSETS[Stage.FINISH]
+                )
+        else:
+            within = 0.0
+        return (self.index + within) / self.total
 
 
 ProgressCallback = Callable[[ProgressEvent], None]
+StageCallback = Callable[[Stage, int, int], None]
+"""``(stage, step, steps)`` reported inside a size; ``plan`` turns it into ``ProgressEvent``s."""

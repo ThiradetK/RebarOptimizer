@@ -11,7 +11,7 @@ from rebar_optimizer.domain.models import Piece
 from rebar_optimizer.domain.settings import OptimizerSettings, StockMode
 from rebar_optimizer.i18n import th
 from rebar_optimizer.services import planner
-from rebar_optimizer.services.cancel import CancelToken, ProgressEvent, ProgressKind
+from rebar_optimizer.services.cancel import CancelToken, ProgressEvent, ProgressKind, Stage
 from rebar_optimizer.services.summary import summarize_size
 
 
@@ -123,13 +123,32 @@ def test_progress_events_in_order() -> None:
     events: list[ProgressEvent] = []
     pieces = [piece("A", "1", 1000, 1), piece("B", "2", 1000, 1)]
     planner.plan(pieces, OptimizerSettings(stock_lengths_mm=(12000,)), on_progress=events.append)
-    assert [(e.kind, e.size, e.index, e.total) for e in events] == [
-        (ProgressKind.SIZE_STARTED, "A", 0, 2),
-        (ProgressKind.SIZE_FINISHED, "A", 0, 2),
-        (ProgressKind.SIZE_STARTED, "B", 1, 2),
-        (ProgressKind.SIZE_FINISHED, "B", 1, 2),
-    ]
-    assert [e.fraction for e in events] == [0.0, 0.5, 0.5, 1.0]
+    # Greedy meets the lower bound here, so there is no SEARCH stage.
+    stages = [Stage.GREEDY, Stage.IMPROVE, Stage.FINISH]
+    expected = []
+    for index, size in enumerate("AB"):
+        expected.append((ProgressKind.SIZE_STARTED, size, index, None))
+        expected += [(ProgressKind.STAGE, size, index, stage) for stage in stages]
+        expected.append((ProgressKind.SIZE_FINISHED, size, index, None))
+    assert [(e.kind, e.size, e.index, e.stage) for e in events] == expected
+    assert all(e.total == 2 for e in events)
+    fractions = [e.fraction for e in events]
+    assert fractions == sorted(fractions)
+    assert (fractions[0], fractions[5], fractions[-1]) == (0.0, 0.5, 1.0)
+
+
+def test_search_stage_and_single_length_steps() -> None:
+    events: list[ProgressEvent] = []
+    pieces = [piece("A", "1", 3300, 7), piece("A", "2", 2100, 5)]
+    settings = OptimizerSettings(
+        stock_lengths_mm=(10000, 12000), stock_mode=StockMode.SINGLE, time_limit_s=5
+    )
+    planner.plan(pieces, settings, on_progress=events.append)
+    staged = [(e.stage, e.step, e.steps) for e in events if e.kind is ProgressKind.STAGE]
+    assert (Stage.GREEDY, 0, 2) in staged and (Stage.GREEDY, 1, 2) in staged
+    assert staged[-1] == (Stage.FINISH, 0, 1)
+    fractions = [e.fraction for e in events]
+    assert fractions == sorted(fractions)
 
 
 def test_cancel_midway_raises() -> None:
@@ -146,7 +165,7 @@ def test_cancel_midway_raises() -> None:
         planner.plan(
             pieces, OptimizerSettings(stock_lengths_mm=(12000,)), on_progress, cancel=token
         )
-    assert seen == ["A", "A"]
+    assert seen[0] == "A" and set(seen) == {"A"}  # B never started
 
 
 def test_invalid_settings_rejected() -> None:

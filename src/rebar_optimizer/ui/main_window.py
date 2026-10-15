@@ -7,11 +7,12 @@ Saving never recomputes, so a locked output file can simply be saved again.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QMimeData, Qt, QThread, QUrl
+from PySide6.QtCore import QByteArray, QMimeData, Qt, QThread, QTimer, QUrl
 from PySide6.QtGui import (
     QCloseEvent,
     QDesktopServices,
@@ -85,6 +86,8 @@ from rebar_optimizer.ui.worker import PlanOutcome, PlanWorker, start_worker
 logger = logging.getLogger(__name__)
 
 PROGRESS_MAX = 1000
+STATUS_ELAPSED_AFTER_S = 2
+"""Append the seconds spent on a step once it has taken this long."""
 TIME_LIMIT_RANGE_S = (1.0, 3600.0)
 
 
@@ -182,6 +185,11 @@ class MainWindow(QMainWindow):
         self._thread: QThread | None = None
         self._last_saved: Path | None = None
         self.issues_dialog: IssuesDialog | None = None
+        self._status_base = ""
+        self._status_since = 0.0
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(1000)
+        self._status_timer.timeout.connect(self._tick_status)
 
         self.setWindowTitle(GUI_TEXT["window_title"])
         self.resize(1200, 760)
@@ -629,6 +637,9 @@ class MainWindow(QMainWindow):
         self._update_actions()
         self._thread = start_worker(worker)
         self._thread.finished.connect(self._on_thread_finished)
+        self._status_base = GUI_TEXT["status_reading"]
+        self._status_since = time.monotonic()
+        self._status_timer.start()
 
     def cancel_computation(self) -> None:
         if self._worker is not None:
@@ -645,10 +656,32 @@ class MainWindow(QMainWindow):
         animations.animate_progress(self.progress_bar, round(event.fraction * PROGRESS_MAX))
         params = {"size": event.size, "index": event.index + 1, "total": event.total}
         if event.kind is ProgressKind.SIZE_STARTED:
-            animations.set_text_faded(self.status_label, GUI_TEXT["status_size"].format(**params))
+            self._set_running_status(GUI_TEXT["status_size"].format(**params))
             self._log(GUI_TEXT["log_size_started"].format(**params))
+        elif event.kind is ProgressKind.STAGE and event.stage is not None:
+            stage = th.STAGE_LABELS[event.stage]
+            step = th.stage_step_text(event.step, event.steps)
+            self._set_running_status(
+                GUI_TEXT["status_stage"].format(stage=stage, step=step, **params)
+            )
+            self._log(GUI_TEXT["log_stage"].format(size=event.size, stage=stage, step=step))
         else:
             self._log(GUI_TEXT["log_size_finished"].format(**params))
+
+    def _set_running_status(self, text: str) -> None:
+        """Show ``text``; the tick timer appends the seconds spent on it."""
+        self._status_base = text
+        self._status_since = time.monotonic()
+        animations.set_text_faded(self.status_label, text)
+
+    def _tick_status(self) -> None:
+        if not self.is_running() or not self._status_base:
+            return
+        seconds = int(time.monotonic() - self._status_since)
+        if seconds >= STATUS_ELAPSED_AFTER_S:
+            self.status_label.setText(
+                self._status_base + GUI_TEXT["elapsed"].format(seconds=seconds)
+            )
 
     def _on_succeeded(self, outcome: PlanOutcome) -> None:
         self._outcome = outcome
@@ -681,6 +714,8 @@ class MainWindow(QMainWindow):
         # Only now is it safe to drop the last references to the thread and worker.
         self._worker = None
         self._thread = None
+        self._status_timer.stop()
+        self._status_base = ""
         self.cancel_button.setEnabled(True)
         self._update_actions()
 

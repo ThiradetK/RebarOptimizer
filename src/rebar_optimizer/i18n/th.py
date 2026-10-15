@@ -18,6 +18,14 @@ SEVERITY_LABELS: dict[Severity, str] = {
     Severity.WARNING: "คำเตือน",
 }
 
+STAGE_LABELS: dict[str, str] = {
+    "greedy": "จัดแผนเบื้องต้น",
+    "improve": "ปรับแผนให้ใช้เศษ",
+    "search": "ค้นหาแผนที่ดีที่สุด",
+    "finish": "สรุปผล",
+}
+"""Steps inside one size (``services.cancel.Stage``), shown while computing."""
+
 STATUS_LABELS: dict[str, str] = {
     "OPTIMAL": "OPTIMAL (ดีที่สุดแล้ว)",
     "FEASIBLE": "FEASIBLE (ดี แต่หมดเวลาก่อนพิสูจน์ว่าดีที่สุด)",
@@ -311,6 +319,7 @@ CLI_TEXT: dict[str, str] = {
     "need_input": "กรุณาระบุไฟล์ input และ --stock",
     "template_written": "สร้างไฟล์ตัวอย่างแล้ว: {path}",
     "progress": "[{index}/{total}] กำลังคำนวณ Size {size} ...",
+    "progress_stage": "      {stage}{step} ...",
     "size_header": "Size {size} — สถานะ {status}",
     "single_stock": "  ความยาวเหล็กเส้นที่เลือก: {stock_m} ม.",
     "stock_count": "  สั่งซื้อ: {items}",
@@ -385,6 +394,10 @@ GUI_TEXT: dict[str, str] = {
     "status_ready": "พร้อมคำนวณ",
     "status_reading": "กำลังอ่านไฟล์…",
     "status_size": "Size {index}/{total}: {size}",
+    "status_stage": "Size {index}/{total}: {size} — {stage}{step}",
+    "stage_step": " (ความยาว stock {step}/{steps})",
+    "elapsed": " · {seconds} วินาที",
+    "log_stage": "Size {size}: {stage}{step}",
     "status_done": "คำนวณเสร็จแล้ว",
     "status_cancelling": "กำลังยกเลิก…",
     "status_cancelled": "ยกเลิกการคำนวณแล้ว",
@@ -456,3 +469,13 @@ GUI_SIZE_TABLE_HEADERS: tuple[str, ...] = (
     "สถานะ",
     "gap",
 )
+
+
+def stage_step_text(step: int, steps: int) -> str:
+    """`` (ความยาว stock 1/2)`` while single-length mode tries several lengths, else ``""``.
+
+    ``step`` is 0-based.
+    """
+    if steps <= 1:
+        return ""
+    return GUI_TEXT["stage_step"].format(step=step + 1, steps=steps)

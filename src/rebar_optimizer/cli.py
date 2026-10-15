@@ -238,6 +238,13 @@ def _print_progress(event: ProgressEvent) -> None:
             CLI_TEXT["progress"].format(index=event.index + 1, total=event.total, size=event.size),
             file=sys.stderr,
         )
+    elif event.kind is ProgressKind.STAGE and event.stage is not None:
+        print(
+            CLI_TEXT["progress_stage"].format(
+                stage=th.STAGE_LABELS[event.stage], step=th.stage_step_text(event.step, event.steps)
+            ),
+            file=sys.stderr,
+        )
 
 
 def _print_issues(header: str, issues: Sequence[Issue]) -> None:
