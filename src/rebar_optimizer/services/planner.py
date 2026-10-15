@@ -61,6 +61,13 @@ logger = logging.getLogger(__name__)
 
 _DIGITS = re.compile(r"(\d+)")
 MIN_ILP_TIME_S = 0.5
+# Shares of a size's time limit (the limit covers the whole size, not only CP-SAT):
+GREEDY_IMPROVE_SHARE = 0.25
+"""Remnant reuse on the greedy plan stops at this point."""
+ENUMERATION_SHARE = 0.10
+"""Pattern enumeration gives up (-> column generation) after this long."""
+FINISH_RESERVE_SHARE = 0.05
+"""Kept back from the ILP for post-processing its result and finishing."""
 """CP-SAT always gets at least this long, even if greedy used up the budget."""
 
 
@@ -313,7 +320,16 @@ def _solve_lengths(
     report(Stage.GREEDY)
     greedy = GreedySolver().solve(demand, stock_set, kerf_mm, cancel, inventory=inventory)
     report(Stage.IMPROVE)
-    greedy_bars = postprocess(greedy.bars, demand, stock_set, kerf_mm, cancel, inventory=inventory)
+    deadline = started + time_limit_s
+    greedy_bars = postprocess(
+        greedy.bars,
+        demand,
+        stock_set,
+        kerf_mm,
+        cancel,
+        inventory=inventory,
+        deadline=started + time_limit_s * GREEDY_IMPROVE_SHARE,
+    )
     greedy_cost = stock_cost(greedy_bars)
     bound = simple_lower_bound(demand, stock_set, kerf_mm, inventory)
     if _meets_bound(greedy_cost, bound):
@@ -329,9 +345,13 @@ def _solve_lengths(
         extra_bars=greedy_bars,
         cancel=cancel,
         inventory=inventory,
+        deadline=min(deadline, time.monotonic() + time_limit_s * ENUMERATION_SHARE),
     )
     options = IlpOptions(
-        time_limit_s=max(MIN_ILP_TIME_S, time_limit_s - (time.monotonic() - started)),
+        # Leave a little for post-processing the ILP result and finishing the size.
+        time_limit_s=max(
+            MIN_ILP_TIME_S, deadline - time.monotonic() - time_limit_s * FINISH_RESERVE_SHARE
+        ),
         random_seed=settings.random_seed,
         num_workers=settings.num_workers,
     )
@@ -361,7 +381,9 @@ def _solve_lengths(
 
     if result.lower_bound_mm is not None:
         bound = max(bound, result.lower_bound_mm)
-    ilp_bars = postprocess(result.bars, demand, stock_set, kerf_mm, cancel, inventory=inventory)
+    ilp_bars = postprocess(
+        result.bars, demand, stock_set, kerf_mm, cancel, inventory=inventory, deadline=deadline
+    )
     ilp_cost = stock_cost(ilp_bars)
     status = result.status
     if _meets_bound(ilp_cost, bound):

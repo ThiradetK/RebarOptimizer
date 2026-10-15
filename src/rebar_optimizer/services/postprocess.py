@@ -15,6 +15,7 @@ length; the plain total without inventory) worse.
 from __future__ import annotations
 
 import bisect
+import time
 from collections import Counter
 from collections.abc import Sequence
 
@@ -40,11 +41,13 @@ def postprocess(
     cancel: CancelToken | None = None,
     *,
     inventory: Inventory = NO_INVENTORY,
+    deadline: float | None = None,
 ) -> list[RawBar]:
+    """D5 steps 1-3. Step 3 stops improving at ``deadline`` (``time.monotonic()``)."""
     before = stock_cost(bars)
     result = remove_overcuts(bars, demand, stock_lengths_mm, kerf_mm)
     result = assign_stock(result, stock_lengths_mm, kerf_mm, inventory)
-    result = reuse_remnants(result, stock_lengths_mm, kerf_mm, cancel)
+    result = reuse_remnants(result, stock_lengths_mm, kerf_mm, cancel, deadline=deadline)
     result = assign_stock(result, stock_lengths_mm, kerf_mm, inventory)
     if stock_cost(result) > before:  # pragma: no cover - guarded by construction
         raise AssertionError("post-processing increased the stock cost")
@@ -174,8 +177,15 @@ def reuse_remnants(
     stock_lengths_mm: Sequence[int],
     kerf_mm: int,
     cancel: CancelToken | None = None,
+    *,
+    deadline: float | None = None,
 ) -> list[RawBar]:
     """Move pieces into other bars' remnants while that closes or downsizes a bar.
+
+    Stops early once ``deadline`` (``time.monotonic()``) passes, keeping the
+    moves made so far: each of them was an improvement, so the plan is valid
+    and never worse than the input (the user agreed to this D5 change so that
+    every size stays within its time limit).
 
     Each pass tries to empty bars (purchased first, longest first), then to
     move single pieces so a purchased bar fits a shorter stock. Only strictly
@@ -184,9 +194,11 @@ def reuse_remnants(
     free capacity, so a pass costs about ``B log B`` rather than ``B²``: a
     100,000-piece size took hours with the old restart-after-every-move loop.
     """
-    pool = _BarPool(bars, kerf_mm)
+    pool = _BarPool(bars, kerf_mm, deadline)
     while True:
         check_cancelled(cancel)
+        if pool.out_of_time():
+            return pool.bars()
         closed = pool.close_pass(cancel)
         shrunk = pool.downsize_pass(stock_lengths_mm, cancel)
         if not (closed or shrunk):
@@ -200,8 +212,9 @@ class _BarPool:
     ``l`` fits bar ``i`` iff ``l + k <= free[i]``. Closed bars become ``None``.
     """
 
-    def __init__(self, bars: Sequence[RawBar], kerf_mm: int) -> None:
+    def __init__(self, bars: Sequence[RawBar], kerf_mm: int, deadline: float | None = None) -> None:
         self.kerf_mm = kerf_mm
+        self._deadline = deadline
         self._bars: list[RawBar | None] = list(bars)
         self._free = [kerf.free_capacity(b.lengths, b.stock_length_mm, kerf_mm) for b in bars]
         self._by_free = sorted((free, i) for i, free in enumerate(self._free))
@@ -209,6 +222,9 @@ class _BarPool:
 
     def bars(self) -> list[RawBar]:
         return [bar for bar in self._bars if bar is not None]
+
+    def out_of_time(self) -> bool:
+        return self._deadline is not None and time.monotonic() > self._deadline
 
     # --- index maintenance ---------------------------------------------------------
 
@@ -247,6 +263,8 @@ class _BarPool:
         for step, source in enumerate(order):
             if step % CANCEL_CHECK_EVERY == 0:
                 check_cancelled(cancel)
+                if self.out_of_time():
+                    return changed
             if self._bars[source] is not None and self._try_close(source):
                 changed = True
         return changed
@@ -309,6 +327,8 @@ class _BarPool:
         for source in range(len(self._bars)):
             if source % CANCEL_CHECK_EVERY == 0:
                 check_cancelled(cancel)
+                if self.out_of_time():
+                    return changed
             bar = self._bars[source]
             if bar is None or len(bar.lengths) < 2 or bar.is_inventory:
                 continue

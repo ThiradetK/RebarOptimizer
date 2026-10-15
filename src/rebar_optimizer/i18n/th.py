@@ -111,7 +111,8 @@ MESSAGES: dict[IssueCode, str] = {
     ),
     IssueCode.UNPLACED_TOO_LONG: "ยาวกว่าเหล็กเส้นที่ยาวที่สุด ({longest_stock_m} ม.)",
     IssueCode.PATTERN_LIMIT_EXCEEDED: (
-        "Size {size}: รูปแบบการตัดมีมากกว่า {max_patterns} แบบ จึงคำนวณด้วย column generation "
+        "Size {size}: รูปแบบการตัดมีมากเกินจะไล่ครบ (เกิน {max_patterns} แบบหรือเกินเวลาที่แบ่งไว้) "
+        "จึงคำนวณด้วย column generation "
         "ผลที่ได้ดีที่สุดหรือใกล้เคียงที่สุด ดูสถานะและ gap % ของ Size นี้ในตารางสรุป"
     ),
     IssueCode.TIME_LIMIT_HIT: (
