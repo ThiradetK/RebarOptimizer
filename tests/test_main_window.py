@@ -133,10 +133,11 @@ def test_successful_run_shows_results_and_saves(
     assert window.progress_bar.value() == window.progress_bar.maximum()
 
     out = tmp_path / "plan.xlsx"
-    assert window.save_result(out)
+    assert window.save_result(out, wait=True)
     assert out.is_file()
     assert openpyxl.load_workbook(out).sheetnames == list(SHEET_NAMES.values())
     assert window.open_file_button.isVisible()
+    assert window.status_label.text() == GUI_TEXT["status_saved"]
 
 
 def test_unplaced_banner(qtbot: QtBot, window: MainWindow, make_xlsx: MakeXlsx) -> None:
@@ -226,12 +227,12 @@ def test_locked_output_can_be_saved_again_without_recomputing(
 
     monkeypatch.setattr(os, "replace", locked)
     out = tmp_path / "plan.xlsx"
-    assert not window.save_result(out)
+    assert not window.save_result(out, wait=True)
     assert window.issues_dialog is not None
     assert "กรุณาปิดไฟล์ plan.xlsx" in window.issues_dialog.text.toPlainText()
 
     monkeypatch.setattr(os, "replace", real_replace)
-    assert window.save_result(out)
+    assert window.save_result(out, wait=True)
     assert window._outcome is plan_before
     assert out.is_file()
 
@@ -318,3 +319,33 @@ def test_size_table_shows_every_size_without_scrolling(
     qtbot.waitUntil(lambda: window.size_table.verticalScrollBar().maximum() == 0, timeout=2000)
     count_bar = window.bar_counts_list.verticalScrollBar()
     assert count_bar.maximum() == 0
+
+
+def test_saving_runs_in_the_background(
+    qtbot: QtBot, window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A large result takes minutes to write; the window must stay usable meanwhile."""
+    import threading
+
+    window.choose_input(write_template(tmp_path / "t.xlsx"))
+    compute(qtbot, window)
+    release = threading.Event()
+    real_write = __import__("rebar_optimizer.ui.worker", fromlist=["write_plan"]).write_plan
+
+    def slow_write(*args: object, **kwargs: object) -> Path:
+        release.wait(10)
+        return real_write(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("rebar_optimizer.ui.worker.write_plan", slow_write)
+    out = tmp_path / "slow.xlsx"
+    assert window.save_result(out)  # returns at once
+    assert window.is_saving()
+    assert not window.save_button.isEnabled()
+    assert not window.compute_button.isEnabled()
+    assert window.status_label.text().startswith(GUI_TEXT["status_saving"])
+    qtbot.wait(50)  # the GUI thread keeps processing events
+    release.set()
+    qtbot.waitUntil(lambda: not window.is_saving(), timeout=10_000)
+    assert out.is_file()
+    assert window.save_button.isEnabled() and window.compute_button.isEnabled()
+    assert window.status_label.text() == GUI_TEXT["status_saved"]

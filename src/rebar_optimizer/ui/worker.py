@@ -17,10 +17,16 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
-from rebar_optimizer.domain.errors import Cancelled, InputValidationError, SettingsError
+from rebar_optimizer.domain.errors import (
+    Cancelled,
+    InputValidationError,
+    OutputWriteError,
+    SettingsError,
+)
 from rebar_optimizer.domain.models import CuttingPlan
 from rebar_optimizer.domain.settings import OptimizerSettings
 from rebar_optimizer.io.reader import ReadResult, read_pieces
+from rebar_optimizer.io.writer import WriteSource, write_plan
 from rebar_optimizer.services import planner
 from rebar_optimizer.services.cancel import CancelToken, ProgressEvent
 from rebar_optimizer.services.summary import plan_totals
@@ -91,7 +97,40 @@ class PlanWorker(QObject):
         self.progress.emit(event)
 
 
-def start_worker(worker: PlanWorker) -> QThread:
+class SaveWorker(QObject):
+    """Writes the Excel file off the GUI thread: a 100,000-row result takes
+    minutes in openpyxl and would otherwise freeze the window.
+
+    Signal order: exactly one of ``saved`` / ``failed`` / ``crashed``, then ``finished``.
+    """
+
+    saved = Signal(object)
+    """``Path`` written."""
+    failed = Signal(object)
+    """``OutputWriteError`` (e.g. the file is open in Excel)."""
+    crashed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, path: Path, plan: CuttingPlan, source: WriteSource) -> None:
+        super().__init__()
+        self._path = path
+        self._plan = plan
+        self._source = source
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.saved.emit(write_plan(self._path, self._plan, self._source))
+        except OutputWriteError as exc:
+            self.failed.emit(exc)
+        except Exception as exc:
+            logger.exception("saving failed")
+            self.crashed.emit(f"{type(exc).__name__}: {exc}")
+        finally:
+            self.finished.emit()
+
+
+def start_worker(worker: PlanWorker | SaveWorker) -> QThread:
     """Move ``worker`` to a new thread and start it; the thread quits when the
     worker reports ``finished``.
 

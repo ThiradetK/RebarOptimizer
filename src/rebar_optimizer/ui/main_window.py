@@ -12,7 +12,16 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QMimeData, Qt, QThread, QTimer, QUrl
+from PySide6.QtCore import (
+    QByteArray,
+    QCoreApplication,
+    QEventLoop,
+    QMimeData,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+)
 from PySide6.QtGui import (
     QCloseEvent,
     QDesktopServices,
@@ -72,7 +81,7 @@ from rebar_optimizer.i18n import th
 from rebar_optimizer.i18n.th import GUI_TEXT, format_metres
 from rebar_optimizer.io.reader import SUPPORTED_SUFFIXES
 from rebar_optimizer.io.template import write_template
-from rebar_optimizer.io.writer import WriteSource, write_plan
+from rebar_optimizer.io.writer import WriteSource
 from rebar_optimizer.services.cancel import ProgressEvent, ProgressKind
 from rebar_optimizer.services.summary import bar_counts, plan_totals, summarize_size
 from rebar_optimizer.ui import animations, user_settings
@@ -81,7 +90,7 @@ from rebar_optimizer.ui.user_settings import UserSettings
 from rebar_optimizer.ui.widgets.collapsible import CollapsibleSection
 from rebar_optimizer.ui.widgets.plan_preview import PlanPreview, PreviewData, prepare_preview
 from rebar_optimizer.ui.widgets.toast import Toast
-from rebar_optimizer.ui.worker import PlanOutcome, PlanWorker, start_worker
+from rebar_optimizer.ui.worker import PlanOutcome, PlanWorker, SaveWorker, start_worker
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +194,9 @@ class MainWindow(QMainWindow):
         self._thread: QThread | None = None
         self._last_saved: Path | None = None
         self.issues_dialog: IssuesDialog | None = None
+        self._save_worker: SaveWorker | None = None
+        self._save_thread: QThread | None = None
+        self._save_succeeded = False
         self._status_base = ""
         self._status_since = 0.0
         self._status_timer = QTimer(self)
@@ -224,7 +236,7 @@ class MainWindow(QMainWindow):
             self.shortcuts[sequence] = shortcut
 
     def _shortcut_open(self) -> None:
-        if not self.is_running():
+        if not self.is_busy():
             self.choose_input()
 
     def _shortcut_save(self) -> None:
@@ -243,14 +255,14 @@ class MainWindow(QMainWindow):
         return path if path.suffix.lower() in SUPPORTED_SUFFIXES else None
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802 - Qt override
-        if not self.is_running() and self.dropped_excel_path(event.mimeData()) is not None:
+        if not self.is_busy() and self.dropped_excel_path(event.mimeData()) is not None:
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802 - Qt override
         path = self.dropped_excel_path(event.mimeData())
-        if path is None or self.is_running():
+        if path is None or self.is_busy():
             self.toast.show_message(GUI_TEXT["drop_not_xlsx"])
             event.ignore()
             return
@@ -518,14 +530,21 @@ class MainWindow(QMainWindow):
     def is_running(self) -> bool:
         return self._worker is not None
 
+    def is_saving(self) -> bool:
+        return self._save_worker is not None
+
+    def is_busy(self) -> bool:
+        """Computing or saving: the form and result actions are locked."""
+        return self.is_running() or self.is_saving()
+
     def form_is_valid(self) -> bool:
         lengths, _ = check_stock_text(self.stock_edit.text())
         return lengths is not None and bool(self.input_edit.text().strip())
 
     def _update_actions(self) -> None:
-        running = self.is_running()
+        running = self.is_busy()
         self.compute_button.setEnabled(not running and self.form_is_valid())
-        self.cancel_button.setVisible(running)
+        self.cancel_button.setVisible(self.is_running())
         for widget in (
             self.input_edit,
             self.browse_button,
@@ -610,7 +629,7 @@ class MainWindow(QMainWindow):
     # --- computation ---------------------------------------------------------------------
 
     def start_computation(self) -> None:
-        if self.is_running() or not self.form_is_valid():
+        if self.is_busy() or not self.form_is_valid():
             return
         try:
             settings = self.current_settings()
@@ -680,7 +699,7 @@ class MainWindow(QMainWindow):
         self._status_base = ""
 
     def _tick_status(self) -> None:
-        if not self.is_running() or not self._status_base:
+        if not self.is_busy() or not self._status_base:
             return
         seconds = int(time.monotonic() - self._status_since)
         if seconds >= STATUS_ELAPSED_AFTER_S:
@@ -867,9 +886,13 @@ class MainWindow(QMainWindow):
         stamp = datetime.now().strftime("%Y%m%d_%H%M")
         return folder / GUI_TEXT["default_output"].format(stamp=stamp)
 
-    def save_result(self, path: Path | None = None) -> bool:
-        """Write the current result; returns ``True`` on success. Never recomputes."""
-        if self._outcome is None:
+    def save_result(self, path: Path | None = None, *, wait: bool = False) -> bool:
+        """Save the current result in the background (never recomputes).
+
+        Returns whether saving started; with ``wait=True`` it blocks (running the
+        event loop) until done and returns whether the file was written.
+        """
+        if self._outcome is None or self.is_busy():
             return False
         if path is None:
             name, _ = QFileDialog.getSaveFileName(
@@ -882,29 +905,68 @@ class MainWindow(QMainWindow):
                 return False
             path = Path(name)
         source = self._outcome.source
-        try:
-            written = write_plan(
-                path,
-                self._outcome.plan,
-                WriteSource(
-                    source.pieces,
-                    source.table,
-                    source.path,
-                    source.warnings,
-                    inventory=source.inventory,
-                    inventory_sheet=source.inventory_sheet,
-                ),
-            )
-        except OutputWriteError as exc:
-            self._show_issues(GUI_TEXT["error_output_header"], exc.issues)
-            return False
+        worker = SaveWorker(
+            path,
+            self._outcome.plan,
+            WriteSource(
+                source.pieces,
+                source.table,
+                source.path,
+                source.warnings,
+                inventory=source.inventory,
+                inventory_sheet=source.inventory_sheet,
+            ),
+        )
+        worker.saved.connect(self._on_saved)
+        worker.failed.connect(self._on_save_failed)
+        worker.crashed.connect(self._on_save_crashed)
+        self._save_worker = worker
+        self._save_succeeded = False
+        self.progress_bar.setRange(0, 0)  # busy: openpyxl reports no progress
+        self._set_running_status(GUI_TEXT["status_saving"])
+        self._status_timer.start()
+        self._update_actions()
+        self._save_thread = start_worker(worker)
+        self._save_thread.finished.connect(self._on_save_thread_finished)
+        if not wait:
+            return True
+        loop = QEventLoop()
+        self._save_thread.finished.connect(loop.quit)
+        if self._save_thread is not None and self._save_thread.isRunning():
+            loop.exec()
+        QCoreApplication.processEvents()  # deliver _on_save_thread_finished
+        return self._save_succeeded
+
+    def _end_save_status(self, text: str) -> None:
+        self._stop_status_ticks()
+        self.progress_bar.setRange(0, PROGRESS_MAX)
+        self.progress_bar.setValue(PROGRESS_MAX)
+        self.status_label.setText(text)
+
+    def _on_saved(self, written: Path) -> None:
+        self._save_succeeded = True
+        self._end_save_status(GUI_TEXT["status_saved"])
         self._last_saved = written
         self._user.last_output_dir = str(written.parent)
         self.saved_label.setText(GUI_TEXT["saved"].format(path=written))
-        self.toast.show_message(GUI_TEXT["saved"].format(path=written.name))
         self.saved_label.setToolTip(str(written))
+        self.toast.show_message(GUI_TEXT["saved"].format(path=written.name))
+
+    def _on_save_failed(self, exc: OutputWriteError) -> None:
+        self._end_save_status(GUI_TEXT["status_save_failed"])
+        self._show_issues(GUI_TEXT["error_output_header"], exc.issues)
+
+    def _on_save_crashed(self, message: str) -> None:
+        self._end_save_status(GUI_TEXT["status_save_failed"])
+        self._log(message)
+        text = GUI_TEXT["unexpected"].format(log_path=self._log_path or "-")
+        self._open_dialog(IssuesDialog(self, GUI_TEXT["unexpected_title"], text, [message]))
+
+    def _on_save_thread_finished(self) -> None:
+        # As with computing: drop the references only once the thread has ended.
+        self._save_worker = None
+        self._save_thread = None
         self._update_actions()
-        return True
 
     def _open_saved_file(self) -> None:
         if self._last_saved is not None:
@@ -934,5 +996,8 @@ class MainWindow(QMainWindow):
         if self._worker is not None:
             self._worker.cancel()
             self.wait_for_worker()
+        if self._save_thread is not None:
+            # A half-written file would be worse than a short wait; saving cannot be cancelled.
+            self._save_thread.wait()
         self.save_user_settings()
         super().closeEvent(event)
