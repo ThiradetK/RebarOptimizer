@@ -45,7 +45,7 @@ def postprocess(
 ) -> list[RawBar]:
     """D5 steps 1-3. Step 3 stops improving at ``deadline`` (``time.monotonic()``)."""
     before = stock_cost(bars)
-    result = remove_overcuts(bars, demand, stock_lengths_mm, kerf_mm)
+    result = remove_overcuts(bars, demand, stock_lengths_mm, kerf_mm, cancel)
     result = assign_stock(result, stock_lengths_mm, kerf_mm, inventory)
     result = reuse_remnants(result, stock_lengths_mm, kerf_mm, cancel, deadline=deadline)
     result = assign_stock(result, stock_lengths_mm, kerf_mm, inventory)
@@ -58,26 +58,48 @@ def postprocess(
 
 
 def remove_overcuts(
-    bars: Sequence[RawBar], demand: Demand, stock_lengths_mm: Sequence[int], kerf_mm: int
+    bars: Sequence[RawBar],
+    demand: Demand,
+    stock_lengths_mm: Sequence[int],
+    kerf_mm: int,
+    cancel: CancelToken | None = None,
 ) -> list[RawBar]:
     """Drop surplus pieces (D5 step 1): prefer (a) the bar whose stock can then
     shrink the most (vanishing counts as shrinking to 0; purchased stock before
     inventory), else (b) the bar that ends up with the longest remnant, so
-    remnants concentrate in one bar."""
-    result = list(bars)
-    surplus = cut_counts(result) - Counter(demand)
+    remnants concentrate in one bar.
+
+    Bars are indexed by the lengths they hold: scanning every bar for every
+    surplus piece took seconds on 50,000-bar ILP results, without a cancel check.
+    """
+    result: list[RawBar | None] = list(bars)
+    surplus = cut_counts(bars) - Counter(demand)
+    holders: dict[int, set[int]] = {length: set() for length in surplus}
+    for position, original in enumerate(bars):
+        for length in set(original.lengths) & holders.keys():
+            holders[length].add(position)
+    removed = 0
     for length in sorted(surplus, reverse=True):
         for _ in range(surplus[length]):
-            index = _bar_to_remove_from(result, length, stock_lengths_mm, kerf_mm)
-            remaining = list(result[index].lengths)
+            removed += 1
+            if removed % CANCEL_CHECK_EVERY == 0:
+                check_cancelled(cancel)
+            candidates = sorted(holders[length])
+            live = [bar_ for i in candidates if (bar_ := result[i]) is not None]
+            index = candidates[_bar_to_remove_from(live, length, stock_lengths_mm, kerf_mm)]
+            bar = result[index]
+            assert bar is not None
+            remaining = list(bar.lengths)
             remaining.remove(length)
+            if length not in remaining:
+                holders[length].discard(index)
             if remaining:
-                result[index] = RawBar.of(
-                    result[index].stock_length_mm, remaining, result[index].source
-                )
+                result[index] = RawBar.of(bar.stock_length_mm, remaining, bar.source)
             else:
-                del result[index]
-    return result
+                result[index] = None
+                for other in holders.values():
+                    other.discard(index)
+    return [bar for bar in result if bar is not None]
 
 
 def _bar_to_remove_from(
