@@ -692,8 +692,9 @@ class MainWindow(QMainWindow):
                 self._stop_status_ticks()
                 animations.animate_progress(self.progress_bar, 0)
                 self.status_label.setText(GUI_TEXT["status_stopped_oversize"])
-                self.stock_edit.setFocus()
-                self.stock_edit.selectAll()
+                # After the dialog closes Qt restores the previous focus; focus the
+                # stock field once that has happened so typing replaces the lengths.
+                QTimer.singleShot(0, self._focus_stock_field)
                 return
             self._log(GUI_TEXT["log_oversize_continue"])
         worker = PlanWorker(Path(self.input_edit.text().strip()), settings, source=source)
@@ -704,6 +705,11 @@ class MainWindow(QMainWindow):
         worker.crashed.connect(self._on_crashed)
         self._start_worker(worker)
         self._status_timer.start()
+
+    def _focus_stock_field(self) -> None:
+        self.activateWindow()
+        self.stock_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.stock_edit.selectAll()
 
     def _confirm_oversize(self, oversized: Sequence[Piece], longest_stock_mm: int) -> bool:
         """Ask whether to plan anyway; ``True`` = continue. Stop is the default."""
