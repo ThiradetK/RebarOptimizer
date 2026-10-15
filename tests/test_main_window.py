@@ -140,10 +140,28 @@ def test_successful_run_shows_results_and_saves(
     assert window.status_label.text() == GUI_TEXT["status_saved"]
 
 
-def test_unplaced_banner(qtbot: QtBot, window: MainWindow, make_xlsx: MakeXlsx) -> None:
+def answer_oversize(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch, go_on: bool
+) -> list[tuple[list[str], int]]:
+    """Replace the blocking warning dialog; record what it would have shown."""
+    asked: list[tuple[list[str], int]] = []
+
+    def confirm(oversized: list[object], longest: int) -> bool:
+        asked.append(([p.no for p in oversized], longest))
+        return go_on
+
+    monkeypatch.setattr(window, "_confirm_oversize", confirm)
+    return asked
+
+
+def test_unplaced_banner(
+    qtbot: QtBot, window: MainWindow, make_xlsx: MakeXlsx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = answer_oversize(window, monkeypatch, go_on=True)
     window.choose_input(make_xlsx([["DB12", 1, 13.0, 2], ["DB12", 2, 3.0, 1]]))
     window.stock_edit.setText("12")
     compute(qtbot, window)
+    assert asked == [(["1"], 12000)]
     assert window.unplaced_banner.isVisible()
     assert "No 1" in window.unplaced_label.text()
     assert "2 ชิ้น" in window.unplaced_label.text()
@@ -349,3 +367,75 @@ def test_saving_runs_in_the_background(
     assert out.is_file()
     assert window.save_button.isEnabled() and window.compute_button.isEnabled()
     assert window.status_label.text() == GUI_TEXT["status_saved"]
+
+
+def test_oversize_warning_stop_keeps_form_and_computes_nothing(
+    qtbot: QtBot, window: MainWindow, make_xlsx: MakeXlsx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = answer_oversize(window, monkeypatch, go_on=False)
+    window.choose_input(
+        make_xlsx([["DB12", 1, 13.0, 2], ["DB16", 2, 12.5, 1], ["DB12", 3, 3.0, 1]])
+    )
+    window.stock_edit.setText("10, 12")
+    compute(qtbot, window)
+    assert asked == [(["1", "2"], 12000)]
+    assert window.status_label.text() == GUI_TEXT["status_stopped_oversize"]
+    assert window._outcome is None
+    assert not window.save_button.isEnabled()
+    assert window.compute_button.isEnabled()
+    assert window.stock_edit.text() == "10, 12"  # nothing cleared
+    # Longer stock -> no question at all.
+    asked.clear()
+    window.stock_edit.setText("10, 14")
+    compute(qtbot, window)
+    assert asked == []
+    assert window._outcome is not None and not window._outcome.plan.unplaced
+
+
+def test_oversize_continue_reads_the_file_only_once(
+    qtbot: QtBot, window: MainWindow, make_xlsx: MakeXlsx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import rebar_optimizer.ui.worker as worker_module
+
+    answer_oversize(window, monkeypatch, go_on=True)
+    reads: list[object] = []
+    real_read = worker_module.read_pieces
+
+    def counting_read(path: object) -> object:
+        reads.append(path)
+        return real_read(path)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(worker_module, "read_pieces", counting_read)
+    window.choose_input(make_xlsx([["DB12", 1, 13.0, 2], ["DB12", 2, 3.0, 1]]))
+    window.stock_edit.setText("12")
+    compute(qtbot, window)
+    assert len(reads) == 1
+    assert window._outcome is not None
+    assert [u.no for u in window._outcome.plan.unplaced] == ["1"]
+    assert "คำนวณต่อ" in window.log_view.toPlainText()
+
+
+def test_oversize_dialog_defaults_to_stop(
+    qtbot: QtBot, window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real dialog: Esc / Enter must not start a plan with unplaced pieces."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from rebar_optimizer.domain.models import Piece
+
+    seen: list[str] = []
+
+    def press_enter() -> None:
+        box = QApplication.activeModalWidget()
+        assert isinstance(box, QMessageBox)
+        seen.append(box.text())
+        seen.append(box.informativeText())
+        box.defaultButton().click()
+
+    QTimer.singleShot(200, press_enter)
+    pieces = [Piece("DB12", str(i), 13000 + i, 1, (i + 2,)) for i in range(12)]
+    assert window._confirm_oversize(pieces, 12000) is False
+    assert "12 รายการ (12 ชิ้น)" in seen[0] and "12.000 ม." in seen[0]
+    assert "อย่างน้อย 13.011 ม." in seen[1]
+    assert "… และอีก 2 รายการ" in seen[1]

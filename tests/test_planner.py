@@ -227,3 +227,9 @@ def test_same_warning_for_several_sizes_is_merged() -> None:
     assert merged[0].params["size"] == ["DB12", "DB16"]
     assert th.format_issue(merged[0]).startswith("Size DB12, DB16:")
     assert merged[1].params["size"] == "DB12"  # different seconds: not merged
+
+
+def test_oversized_pieces_uses_the_longest_stock() -> None:
+    pieces = [piece("A", "1", 12000, 1), piece("A", "2", 12001, 2), piece("B", "3", 9000, 1)]
+    assert [p.no for p in planner.oversized_pieces(pieces, (10000, 12000))] == ["2"]
+    assert [p.no for p in planner.oversized_pieces(pieces, (8000,))] == ["1", "2", "3"]

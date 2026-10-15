@@ -129,6 +129,16 @@ def plan(
     return result
 
 
+def oversized_pieces(pieces: Sequence[Piece], stock_lengths_mm: Sequence[int]) -> list[Piece]:
+    """Pieces longer than the longest (new) stock length, in input order.
+
+    ``plan`` reports these as unplaced (D4); the GUI asks before planning
+    whether to continue or to change the stock lengths first.
+    """
+    longest = max(stock_lengths_mm)
+    return [p for p in pieces if p.length_mm > longest]
+
+
 def _stage_reporter(
     on_progress: ProgressCallback | None, size: str, index: int, total: int
 ) -> StageCallback | None:

@@ -401,6 +401,21 @@ GUI_TEXT: dict[str, str] = {
     "log_stage": "Size {size}: {stage}{step}",
     "status_done": "คำนวณเสร็จแล้ว",
     "status_saving": "กำลังบันทึกไฟล์ Excel…",
+    "status_stopped_oversize": "หยุดก่อนคำนวณ — แก้ความยาว stock แล้วกดคำนวณอีกครั้ง",
+    "oversize_title": "มีชิ้นงานยาวกว่าเหล็กเส้น",
+    "oversize_text": ("พบชิ้นงาน {rows} รายการ ({pieces} ชิ้น) ที่ยาวกว่าเหล็กเส้นที่ยาวที่สุด {longest_m} ม."),
+    "oversize_info": (
+        'ถ้าคำนวณต่อ ชิ้นเหล่านี้จะไม่ถูกตัด และไปอยู่ในชีต "วางไม่ได้"\n'
+        "ถ้าหยุด ให้เพิ่มความยาว stock (ต้องยาวอย่างน้อย {needed_m} ม.) แล้วกดคำนวณใหม่\n\n"
+        "{items}"
+    ),
+    "oversize_item": "Size {size} No {no} ยาว {length_m} ม. × {quantity}",
+    "oversize_more": "… และอีก {count} รายการ",
+    "oversize_continue": "คำนวณต่อ",
+    "oversize_stop": "หยุด แล้วแก้ความยาว stock",
+    "log_oversize": "พบชิ้นงานยาวกว่า stock {rows} รายการ ({pieces} ชิ้น)",
+    "log_oversize_stop": "หยุดก่อนคำนวณตามที่เลือก",
+    "log_oversize_continue": "คำนวณต่อ ชิ้นที่ยาวเกินจะอยู่ในรายการวางไม่ได้",
     "status_saved": "บันทึกไฟล์แล้ว",
     "status_save_failed": "บันทึกไฟล์ไม่สำเร็จ",
     "status_cancelling": "กำลังยกเลิก…",

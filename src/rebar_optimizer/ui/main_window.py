@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -69,7 +70,7 @@ from rebar_optimizer.domain.errors import (
     OutputWriteError,
     SettingsError,
 )
-from rebar_optimizer.domain.models import CuttingPlan
+from rebar_optimizer.domain.models import CuttingPlan, Piece
 from rebar_optimizer.domain.settings import (
     KERF_MAX_MM,
     KERF_MIN_MM,
@@ -79,9 +80,10 @@ from rebar_optimizer.domain.settings import (
 )
 from rebar_optimizer.i18n import th
 from rebar_optimizer.i18n.th import GUI_TEXT, format_metres
-from rebar_optimizer.io.reader import SUPPORTED_SUFFIXES
+from rebar_optimizer.io.reader import SUPPORTED_SUFFIXES, ReadResult
 from rebar_optimizer.io.template import write_template
 from rebar_optimizer.io.writer import WriteSource
+from rebar_optimizer.services import planner
 from rebar_optimizer.services.cancel import ProgressEvent, ProgressKind
 from rebar_optimizer.services.summary import bar_counts, plan_totals, summarize_size
 from rebar_optimizer.ui import animations, user_settings
@@ -90,12 +92,20 @@ from rebar_optimizer.ui.user_settings import UserSettings
 from rebar_optimizer.ui.widgets.collapsible import CollapsibleSection
 from rebar_optimizer.ui.widgets.plan_preview import PlanPreview, PreviewData, prepare_preview
 from rebar_optimizer.ui.widgets.toast import Toast
-from rebar_optimizer.ui.worker import PlanOutcome, PlanWorker, SaveWorker, start_worker
+from rebar_optimizer.ui.worker import (
+    PlanOutcome,
+    PlanWorker,
+    ReadWorker,
+    SaveWorker,
+    start_worker,
+)
 
 logger = logging.getLogger(__name__)
 
 PROGRESS_MAX = 1000
 STATUS_ELAPSED_AFTER_S = 2
+OVERSIZE_LIST_LIMIT = 10
+"""Oversize pieces listed by name in the warning; the rest are counted."""
 """Append the seconds spent on a step once it has taken this long."""
 TIME_LIMIT_RANGE_S = (1.0, 3600.0)
 
@@ -190,10 +200,12 @@ class MainWindow(QMainWindow):
         self._log_path = log_path
         self._user = user_settings.load(settings_path)
         self._outcome: PlanOutcome | None = None
-        self._worker: PlanWorker | None = None
+        self._worker: PlanWorker | ReadWorker | None = None
         self._thread: QThread | None = None
         self._last_saved: Path | None = None
         self.issues_dialog: IssuesDialog | None = None
+        self._pending_source: ReadResult | None = None
+        self._pending_settings: OptimizerSettings | None = None
         self._save_worker: SaveWorker | None = None
         self._save_thread: QThread | None = None
         self._save_succeeded = False
@@ -646,19 +658,87 @@ class MainWindow(QMainWindow):
         animations.animate_progress(self.progress_bar, 0)
         self.status_label.setText(GUI_TEXT["status_reading"])
 
-        worker = PlanWorker(path, settings)
+        # Step 1: read (in the background). Planning starts from what was read,
+        # once _on_thread_finished has checked for pieces longer than the stock.
+        reader = ReadWorker(path)
+        reader.read.connect(self._on_read)
+        reader.input_invalid.connect(self._on_input_invalid)
+        reader.cancelled.connect(self._on_cancelled)
+        reader.crashed.connect(self._on_crashed)
+        self._pending_settings = settings
+        self._start_worker(reader)
+        self._status_base = GUI_TEXT["status_reading"]
+        self._status_since = time.monotonic()
+        self._status_timer.start()
+
+    def _start_worker(self, worker: PlanWorker | ReadWorker) -> None:
+        self._worker = worker
+        self._update_actions()
+        self._thread = start_worker(worker)
+        self._thread.finished.connect(self._on_thread_finished)
+
+    def _on_read(self, source: ReadResult) -> None:
+        self._pending_source = source
+
+    def _start_planning(self, source: ReadResult, settings: OptimizerSettings) -> None:
+        """Step 2: plan, unless pieces are longer than every stock length and the
+        user prefers to change the lengths first."""
+        oversized = planner.oversized_pieces(source.pieces, settings.stock_lengths_mm)
+        if oversized:
+            pieces = sum(p.quantity for p in oversized)
+            self._log(GUI_TEXT["log_oversize"].format(rows=len(oversized), pieces=pieces))
+            if not self._confirm_oversize(oversized, max(settings.stock_lengths_mm)):
+                self._log(GUI_TEXT["log_oversize_stop"])
+                self._stop_status_ticks()
+                animations.animate_progress(self.progress_bar, 0)
+                self.status_label.setText(GUI_TEXT["status_stopped_oversize"])
+                self.stock_edit.setFocus()
+                self.stock_edit.selectAll()
+                return
+            self._log(GUI_TEXT["log_oversize_continue"])
+        worker = PlanWorker(Path(self.input_edit.text().strip()), settings, source=source)
         worker.progress.connect(self._on_progress)
         worker.succeeded.connect(self._on_succeeded)
         worker.input_invalid.connect(self._on_input_invalid)
         worker.cancelled.connect(self._on_cancelled)
         worker.crashed.connect(self._on_crashed)
-        self._worker = worker
-        self._update_actions()
-        self._thread = start_worker(worker)
-        self._thread.finished.connect(self._on_thread_finished)
-        self._status_base = GUI_TEXT["status_reading"]
-        self._status_since = time.monotonic()
+        self._start_worker(worker)
         self._status_timer.start()
+
+    def _confirm_oversize(self, oversized: Sequence[Piece], longest_stock_mm: int) -> bool:
+        """Ask whether to plan anyway; ``True`` = continue. Stop is the default."""
+        items = [
+            GUI_TEXT["oversize_item"].format(
+                size=p.size, no=p.no, length_m=format_metres(p.length_mm), quantity=p.quantity
+            )
+            for p in oversized[:OVERSIZE_LIST_LIMIT]
+        ]
+        if len(oversized) > OVERSIZE_LIST_LIMIT:
+            items.append(
+                GUI_TEXT["oversize_more"].format(count=len(oversized) - OVERSIZE_LIST_LIMIT)
+            )
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(GUI_TEXT["oversize_title"])
+        box.setText(
+            GUI_TEXT["oversize_text"].format(
+                rows=len(oversized),
+                pieces=sum(p.quantity for p in oversized),
+                longest_m=format_metres(longest_stock_mm),
+            )
+        )
+        box.setInformativeText(
+            GUI_TEXT["oversize_info"].format(
+                needed_m=format_metres(max(p.length_mm for p in oversized)),
+                items="\n".join(items),
+            )
+        )
+        go_on = box.addButton(GUI_TEXT["oversize_continue"], QMessageBox.ButtonRole.AcceptRole)
+        stop = box.addButton(GUI_TEXT["oversize_stop"], QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(stop)
+        box.setEscapeButton(stop)
+        box.exec()
+        return box.clickedButton() is go_on
 
     def cancel_computation(self) -> None:
         if self._worker is not None:
@@ -742,6 +822,13 @@ class MainWindow(QMainWindow):
         # Only now is it safe to drop the last references to the thread and worker.
         self._worker = None
         self._thread = None
+        source, settings = self._pending_source, self._pending_settings
+        self._pending_source = None
+        self._pending_settings = None
+        if source is not None and settings is not None:
+            self._start_planning(source, settings)  # reading done: on to step 2
+            if self._worker is not None:
+                return
         self._stop_status_ticks()
         self.cancel_button.setEnabled(True)
         self._update_actions()

@@ -55,10 +55,14 @@ class PlanWorker(QObject):
     """Short English description; details are in the log."""
     finished = Signal()
 
-    def __init__(self, input_path: Path, settings: OptimizerSettings) -> None:
+    def __init__(
+        self, input_path: Path, settings: OptimizerSettings, source: ReadResult | None = None
+    ) -> None:
+        """``source``: the already-read input (skips reading ``input_path`` again)."""
         super().__init__()
         self._input_path = input_path
         self._settings = settings
+        self._source = source
         self._token = CancelToken()
 
     def cancel(self) -> None:
@@ -69,7 +73,7 @@ class PlanWorker(QObject):
     def run(self) -> None:
         try:
             self._token.raise_if_cancelled()
-            source = read_pieces(self._input_path)
+            source = self._source if self._source is not None else read_pieces(self._input_path)
             plan = planner.plan(
                 source.pieces,
                 self._settings,
@@ -95,6 +99,47 @@ class PlanWorker(QObject):
 
     def _emit_progress(self, event: ProgressEvent) -> None:
         self.progress.emit(event)
+
+
+class ReadWorker(QObject):
+    """Reads and validates the input off the GUI thread (100,000 rows take seconds),
+    so the window can check it before planning starts.
+
+    Signal order: exactly one of ``read`` / ``input_invalid`` / ``cancelled`` /
+    ``crashed``, then ``finished``.
+    """
+
+    read = Signal(object)
+    """``ReadResult``."""
+    input_invalid = Signal(object)
+    cancelled = Signal()
+    crashed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, input_path: Path) -> None:
+        super().__init__()
+        self._input_path = input_path
+        self._token = CancelToken()
+
+    def cancel(self) -> None:
+        self._token.cancel()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self._token.raise_if_cancelled()
+            source = read_pieces(self._input_path)
+            self._token.raise_if_cancelled()
+            self.read.emit(source)
+        except InputValidationError as exc:
+            self.input_invalid.emit(exc)
+        except Cancelled:
+            self.cancelled.emit()
+        except Exception as exc:
+            logger.exception("reading failed")
+            self.crashed.emit(f"{type(exc).__name__}: {exc}")
+        finally:
+            self.finished.emit()
 
 
 class SaveWorker(QObject):
@@ -130,7 +175,7 @@ class SaveWorker(QObject):
             self.finished.emit()
 
 
-def start_worker(worker: PlanWorker | SaveWorker) -> QThread:
+def start_worker(worker: PlanWorker | ReadWorker | SaveWorker) -> QThread:
     """Move ``worker`` to a new thread and start it; the thread quits when the
     worker reports ``finished``.
 
