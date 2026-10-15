@@ -19,7 +19,6 @@ import logging
 import math
 import threading
 import time
-from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -29,7 +28,7 @@ from rebar_optimizer.domain.errors import Cancelled
 from rebar_optimizer.domain.models import SolveStatus, StockSource
 from rebar_optimizer.services.cancel import CancelToken, check_cancelled
 from rebar_optimizer.solver.base import NO_INVENTORY, Demand, Inventory, RawBar, SolveResult
-from rebar_optimizer.solver.patterns import Pattern, PatternSet, pattern_of
+from rebar_optimizer.solver.patterns import Pattern, PatternSet, pattern_counts
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +95,7 @@ def solve_patterns(
         ]
         return cp_model.LinearExpr.weighted_sum([x for x, _ in chosen], [c for _, c in chosen])
 
-    hinted = Counter(pattern_of(bar, lengths) for bar in hint)
+    hinted = pattern_counts(hint, lengths)
     if hinted:
         for pattern, x in zip(patterns, variables, strict=True):
             model.add_hint(x, hinted.get(pattern, 0))
@@ -105,7 +104,10 @@ def solve_patterns(
     new_cost = cost(StockSource.NEW)
     model.minimize(new_cost)
     share = PURCHASE_SHARE_OF_TIME if two_phase else 1.0
-    phase = _run(model, variables, options, options.time_limit_s * share, cancel)
+    # ``time_limit_s`` covers this whole call: building a large model takes seconds.
+    building = time.monotonic() - started
+    phase_limit = max(MIN_PHASE_TIME_S, options.time_limit_s * share - building)
+    phase = _run(model, variables, options, phase_limit, cancel)
     if phase is None:
         return None
     _log("purchase", len(patterns), divisor, phase)

@@ -34,7 +34,7 @@ from rebar_optimizer.solver import kerf
 from rebar_optimizer.solver.base import NO_INVENTORY, Demand, Inventory, RawBar, SolveResult
 from rebar_optimizer.solver.greedy import GreedySolver
 from rebar_optimizer.solver.ilp import IlpOptions, solve_patterns
-from rebar_optimizer.solver.patterns import Pattern, PatternSet, pattern_of
+from rebar_optimizer.solver.patterns import Pattern, PatternSet, pattern_counts
 
 logger = logging.getLogger(__name__)
 
@@ -121,10 +121,20 @@ class _MasterLp:
 
 
 def _initial_columns(
-    lengths: Sequence[int], stocks: Sequence[int], kerf_mm: int, bars: Sequence[RawBar]
+    lengths: Sequence[int],
+    stocks: Sequence[int],
+    kerf_mm: int,
+    bars: Sequence[RawBar] = (),
+    *,
+    bar_patterns: Sequence[Pattern] | None = None,
 ) -> list[Pattern]:
-    """Greedy patterns plus one single-piece pattern per length (always feasible)."""
-    columns = [pattern_of(bar, lengths) for bar in bars]
+    """Greedy patterns plus one single-piece pattern per length (always feasible).
+
+    Pass ``bar_patterns`` (the converted ``bars``) to avoid converting them again.
+    """
+    columns = (
+        list(bar_patterns) if bar_patterns is not None else list(pattern_counts(bars, lengths))
+    )
     for i, length in enumerate(lengths):
         stock = kerf.shortest_fitting_stock([length], stocks, kerf_mm)
         if stock is not None:
@@ -199,7 +209,8 @@ def solve_colgen(
     new_stocks = sorted(stock_lengths_mm)
     stocks = sorted(set(new_stocks) | set(inventory))
     master = _MasterLp(lengths, demand)
-    for pattern in _initial_columns(lengths, stocks, kerf_mm, initial_bars):
+    greedy_patterns = list(pattern_counts(initial_bars, lengths))
+    for pattern in _initial_columns(lengths, stocks, kerf_mm, bar_patterns=greedy_patterns):
         master.add(pattern)
 
     lower_bound, converged, iterations = _generate_columns(
@@ -228,7 +239,7 @@ def solve_colgen(
         new_stocks,
         inventory=inventory,
         kerf_mm=kerf_mm,
-        initial_bars=initial_bars,
+        greedy_patterns=greedy_patterns,
     )
     pattern_set = PatternSet(lengths=lengths, patterns=patterns)
     remaining = max(0.5, options.time_limit_s - (time.monotonic() - started))
@@ -252,7 +263,7 @@ def _integer_patterns(
     *,
     inventory: Inventory,
     kerf_mm: int,
-    initial_bars: Sequence[RawBar],
+    greedy_patterns: Sequence[Pattern],
 ) -> tuple[Pattern, ...]:
     """LP columns as patterns on each source that has their length, plus the
     initial bars and single pieces on new stock (always feasible)."""
@@ -262,6 +273,6 @@ def _integer_patterns(
             found[column] = None
         if column.stock_length_mm in inventory:
             found[replace(column, source=StockSource.INVENTORY)] = None
-    for column in _initial_columns(lengths, new_stocks, kerf_mm, initial_bars):
+    for column in _initial_columns(lengths, new_stocks, kerf_mm, bar_patterns=greedy_patterns):
         found.setdefault(column, None)
     return tuple(found)

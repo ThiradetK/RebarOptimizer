@@ -142,7 +142,10 @@ def test_tiny_time_limit_still_returns_a_verified_plan(hard_size: list[Piece]) -
     settings_ = OptimizerSettings(stock_lengths_mm=(10000, 12000), time_limit_s=0.01)
     result = planner.plan(hard_size, settings_)  # verify_plan runs inside
     size_plan = result.sizes[0]
-    assert size_plan.status in (SolveStatus.FEASIBLE, SolveStatus.GREEDY)
+    # Enumeration gives up at once and column generation takes over; it may even
+    # prove optimality, but only when the plan meets its lower bound.
+    if size_plan.status is SolveStatus.OPTIMAL:
+        assert size_plan.lower_bound_mm == size_plan.total_stock_mm
     assert size_plan.total_stock_mm <= greedy_total(hard_size, (10000, 12000), 0)
 
 
