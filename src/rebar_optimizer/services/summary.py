@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import functools
+import weakref
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import TypeVar
 
 from rebar_optimizer.domain.models import BarGroup, Cut, CuttingPlan, SizePlan, StockSource
 from rebar_optimizer.domain.weights import unit_weight_kg_per_m
@@ -54,12 +57,45 @@ def bar_detail(group: BarGroup, kerf_mm: int, piece_lengths_mm: tuple[int, ...])
     return BarDetail(usage=usage, longest_cuttable_mm=longest)
 
 
+_T = TypeVar("_T")
+_MEMO: dict[tuple[int, str], tuple[weakref.ref[SizePlan], object]] = {}
+
+
+def _memo(plan: SizePlan, kind: str, compute: Callable[[], _T]) -> _T:
+    """Compute once per ``SizePlan`` object. Plans are immutable, but hashing one
+    with tens of thousands of bar groups is itself slow, so entries are keyed by
+    identity and dropped when the plan is garbage collected."""
+    key = (id(plan), kind)
+    entry = _MEMO.get(key)
+    if entry is not None and entry[0]() is plan:
+        return entry[1]  # type: ignore[return-value]
+    value = compute()
+    _MEMO[key] = (weakref.ref(plan, functools.partial(_forget, key)), value)
+    return value
+
+
+def _forget(key: tuple[int, str], _ref: object) -> None:
+    _MEMO.pop(key, None)
+
+
+def group_details(plan: SizePlan) -> list[BarDetail]:
+    """``bar_detail`` of every group, in group order (computed once per plan)."""
+    return _memo(
+        plan,
+        "details",
+        lambda: [bar_detail(g, plan.kerf_mm, plan.piece_lengths_mm) for g in plan.groups],
+    )
+
+
 def summarize_size(plan: SizePlan) -> SizeSummary:
+    return _memo(plan, "summary", lambda: _summarize_size(plan))
+
+
+def _summarize_size(plan: SizePlan) -> SizeSummary:
     by_stock: Counter[int] = Counter()
     by_inventory: Counter[int] = Counter()
     stock = pieces = reusable = waste = kerf_total = piece_count = 0
-    for group in plan.groups:
-        detail = bar_detail(group, plan.kerf_mm, plan.piece_lengths_mm)
+    for group, detail in zip(plan.groups, group_details(plan), strict=True):
         n = group.count
         if group.bar.source is StockSource.INVENTORY:
             by_inventory[group.bar.stock_length_mm] += n

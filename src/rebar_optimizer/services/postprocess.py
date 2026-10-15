@@ -341,6 +341,9 @@ class _BarPool:
 def classify_remnant(remnant_mm: int, piece_lengths_mm: Sequence[int]) -> int | None:
     """Longest piece length of the size that fits the remnant (reusable),
     or ``None`` if nothing fits (waste). Remnants already exclude the last
-    kerf (D3), so the comparison is a plain ``piece <= remnant``."""
-    fitting = [length for length in piece_lengths_mm if length <= remnant_mm]
-    return max(fitting) if fitting else None
+    kerf (D3), so the comparison is a plain ``piece <= remnant``.
+
+    ``piece_lengths_mm`` must be sorted shortest first (``SizePlan.piece_lengths_mm`` is).
+    """
+    pos = bisect.bisect_right(piece_lengths_mm, remnant_mm)
+    return piece_lengths_mm[pos - 1] if pos else None
