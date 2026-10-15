@@ -7,11 +7,21 @@ Saving never recomputes, so a locked output file can simply be saved again.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QMimeData, Qt, QThread, QUrl
+from PySide6.QtCore import (
+    QByteArray,
+    QCoreApplication,
+    QEventLoop,
+    QMimeData,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+)
 from PySide6.QtGui import (
     QCloseEvent,
     QDesktopServices,
@@ -38,6 +48,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -59,7 +70,7 @@ from rebar_optimizer.domain.errors import (
     OutputWriteError,
     SettingsError,
 )
-from rebar_optimizer.domain.models import CuttingPlan
+from rebar_optimizer.domain.models import CuttingPlan, Piece
 from rebar_optimizer.domain.settings import (
     KERF_MAX_MM,
     KERF_MIN_MM,
@@ -69,22 +80,33 @@ from rebar_optimizer.domain.settings import (
 )
 from rebar_optimizer.i18n import th
 from rebar_optimizer.i18n.th import GUI_TEXT, format_metres
-from rebar_optimizer.io.reader import SUPPORTED_SUFFIXES
+from rebar_optimizer.io.reader import SUPPORTED_SUFFIXES, ReadResult
 from rebar_optimizer.io.template import write_template
-from rebar_optimizer.io.writer import WriteSource, write_plan
+from rebar_optimizer.io.writer import WriteSource
+from rebar_optimizer.services import planner
 from rebar_optimizer.services.cancel import ProgressEvent, ProgressKind
-from rebar_optimizer.services.summary import plan_totals, summarize_size
+from rebar_optimizer.services.summary import bar_counts, plan_totals, summarize_size
 from rebar_optimizer.ui import animations, user_settings
 from rebar_optimizer.ui.theme import Theme, current_theme
 from rebar_optimizer.ui.user_settings import UserSettings
 from rebar_optimizer.ui.widgets.collapsible import CollapsibleSection
-from rebar_optimizer.ui.widgets.plan_preview import PlanPreview
+from rebar_optimizer.ui.widgets.plan_preview import PlanPreview, PreviewData, prepare_preview
 from rebar_optimizer.ui.widgets.toast import Toast
-from rebar_optimizer.ui.worker import PlanOutcome, PlanWorker, start_worker
+from rebar_optimizer.ui.worker import (
+    PlanOutcome,
+    PlanWorker,
+    ReadWorker,
+    SaveWorker,
+    start_worker,
+)
 
 logger = logging.getLogger(__name__)
 
 PROGRESS_MAX = 1000
+STATUS_ELAPSED_AFTER_S = 2
+OVERSIZE_LIST_LIMIT = 10
+"""Oversize pieces listed by name in the warning; the rest are counted."""
+"""Append the seconds spent on a step once it has taken this long."""
 TIME_LIMIT_RANGE_S = (1.0, 3600.0)
 
 
@@ -96,6 +118,42 @@ def check_stock_text(text: str) -> tuple[tuple[int, ...] | None, list[str]]:
     except SettingsError as exc:
         return None, [th.format_issue(issue) for issue in exc.issues]
     return lengths, []
+
+
+MAX_VISIBLE_SIZE_ROWS = 8
+MAX_VISIBLE_COUNT_ROWS = 8
+MAX_VISIBLE_WARNING_ROWS = 4
+
+
+def fit_table_height(table: QTableWidget, max_rows: int) -> None:
+    """Show every row up to ``max_rows``; scroll beyond that."""
+    rows = max(1, min(table.rowCount(), max_rows))
+    row_height = table.verticalHeader().defaultSectionSize()
+    if table.rowCount():
+        row_height = table.rowHeight(0)
+    height = table.horizontalHeader().height() + rows * row_height + 2 * table.frameWidth()
+    table.setFixedHeight(height + 2)
+
+
+def fit_list_height(widget: QListWidget, max_rows: int) -> None:
+    """Size a list to its items (word-wrapped ones included) up to ``max_rows`` lines."""
+    widget.doItemsLayout()
+    heights = [widget.sizeHintForRow(i) for i in range(widget.count())]
+    line = max(heights[:1] or [widget.fontMetrics().height() + 4])
+    content = sum(heights) if heights else line
+    widget.setFixedHeight(min(content, line * max_rows) + 2 * widget.frameWidth() + 4)
+
+
+def result_source_text(outcome: PlanOutcome, computed_at: datetime) -> str:
+    """Which input and settings the shown result belongs to."""
+    settings = outcome.plan.settings
+    return GUI_TEXT["result_source"].format(
+        name=outcome.source.path.name,
+        stocks=format_stock_text(sorted(settings.stock_lengths_mm)),
+        mode=th.STOCK_MODE_LABELS[settings.stock_mode],
+        kerf=settings.kerf_mm,
+        time=computed_at.strftime("%H:%M"),
+    )
 
 
 def format_stock_text(lengths_mm: Sequence[int]) -> str:
@@ -142,10 +200,20 @@ class MainWindow(QMainWindow):
         self._log_path = log_path
         self._user = user_settings.load(settings_path)
         self._outcome: PlanOutcome | None = None
-        self._worker: PlanWorker | None = None
+        self._worker: PlanWorker | ReadWorker | None = None
         self._thread: QThread | None = None
         self._last_saved: Path | None = None
         self.issues_dialog: IssuesDialog | None = None
+        self._pending_source: ReadResult | None = None
+        self._pending_settings: OptimizerSettings | None = None
+        self._save_worker: SaveWorker | None = None
+        self._save_thread: QThread | None = None
+        self._save_succeeded = False
+        self._status_base = ""
+        self._status_since = 0.0
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(1000)
+        self._status_timer.timeout.connect(self._tick_status)
 
         self.setWindowTitle(GUI_TEXT["window_title"])
         self.resize(1200, 760)
@@ -180,7 +248,7 @@ class MainWindow(QMainWindow):
             self.shortcuts[sequence] = shortcut
 
     def _shortcut_open(self) -> None:
-        if not self.is_running():
+        if not self.is_busy():
             self.choose_input()
 
     def _shortcut_save(self) -> None:
@@ -199,14 +267,14 @@ class MainWindow(QMainWindow):
         return path if path.suffix.lower() in SUPPORTED_SUFFIXES else None
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802 - Qt override
-        if not self.is_running() and self.dropped_excel_path(event.mimeData()) is not None:
+        if not self.is_busy() and self.dropped_excel_path(event.mimeData()) is not None:
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802 - Qt override
         path = self.dropped_excel_path(event.mimeData())
-        if path is None or self.is_running():
+        if path is None or self.is_busy():
             self.toast.show_message(GUI_TEXT["drop_not_xlsx"])
             event.ignore()
             return
@@ -338,6 +406,12 @@ class MainWindow(QMainWindow):
         banner_layout.addWidget(self.unplaced_label)
         layout.addWidget(self.unplaced_banner)
 
+        self.source_label = QLabel()
+        self.source_label.setObjectName("muted")
+        self.source_label.setWordWrap(True)
+        self.source_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.source_label)
+
         self.summary_card = QFrame()
         self.summary_card.setObjectName("summaryCard")
         metrics = QGridLayout(self.summary_card)
@@ -366,8 +440,19 @@ class MainWindow(QMainWindow):
         self.size_table.verticalHeader().setVisible(False)
         self.size_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.size_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.size_table.setMaximumHeight(150)
+        self.size_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         layout.addWidget(self.size_table)
+
+        counts_header = QHBoxLayout()
+        self.bar_counts_title = QLabel(th.BAR_COUNT_TITLE)
+        self.bar_counts_title.setObjectName("metricLabel")
+        self.copy_counts_button = QPushButton(GUI_TEXT["copy"])
+        self.copy_counts_button.clicked.connect(self.copy_bar_counts)
+        counts_header.addWidget(self.bar_counts_title, 1)
+        counts_header.addWidget(self.copy_counts_button)
+        layout.addLayout(counts_header)
+        self.bar_counts_list = QListWidget()
+        layout.addWidget(self.bar_counts_list)
 
         self.preview_tabs = QTabWidget()
         self.preview_tabs.setDocumentMode(True)
@@ -378,7 +463,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.warnings_title)
         self.warnings_list = QListWidget()
         self.warnings_list.setWordWrap(True)
-        self.warnings_list.setMaximumHeight(96)
         layout.addWidget(self.warnings_list)
 
         save_row = QHBoxLayout()
@@ -458,14 +542,21 @@ class MainWindow(QMainWindow):
     def is_running(self) -> bool:
         return self._worker is not None
 
+    def is_saving(self) -> bool:
+        return self._save_worker is not None
+
+    def is_busy(self) -> bool:
+        """Computing or saving: the form and result actions are locked."""
+        return self.is_running() or self.is_saving()
+
     def form_is_valid(self) -> bool:
         lengths, _ = check_stock_text(self.stock_edit.text())
         return lengths is not None and bool(self.input_edit.text().strip())
 
     def _update_actions(self) -> None:
-        running = self.is_running()
+        running = self.is_busy()
         self.compute_button.setEnabled(not running and self.form_is_valid())
-        self.cancel_button.setVisible(running)
+        self.cancel_button.setVisible(self.is_running())
         for widget in (
             self.input_edit,
             self.browse_button,
@@ -493,8 +584,16 @@ class MainWindow(QMainWindow):
             time_limit_s=self.time_limit_spin.value(),
         )
 
+    def clear_results(self) -> None:
+        """Forget the shown result so it can never be saved for another input."""
+        self._outcome = None
+        self._last_saved = None
+        self.saved_label.clear()
+        self._show_results(None)
+
     def clear_form(self) -> None:
         """Reset the form to defaults; only ever triggered by the user."""
+        self.clear_results()
         self.input_edit.clear()
         self._user = UserSettings(
             window_geometry=self._user.window_geometry,
@@ -517,6 +616,8 @@ class MainWindow(QMainWindow):
             if not name:
                 return
             path = Path(name)
+        if str(path) != self.input_edit.text().strip():
+            self.clear_results()
         self.input_edit.setText(str(path))
         self._user.last_input_dir = str(path.parent)
 
@@ -540,7 +641,7 @@ class MainWindow(QMainWindow):
     # --- computation ---------------------------------------------------------------------
 
     def start_computation(self) -> None:
-        if self.is_running() or not self.form_is_valid():
+        if self.is_busy() or not self.form_is_valid():
             return
         try:
             settings = self.current_settings()
@@ -550,26 +651,105 @@ class MainWindow(QMainWindow):
             return
         path = Path(self.input_edit.text().strip())
         self.save_user_settings()
+        # A new run replaces the old result even if it fails or is cancelled.
+        self.clear_results()
         self.log_view.clear()
         self._log(GUI_TEXT["log_started"].format(path=path))
         animations.animate_progress(self.progress_bar, 0)
         self.status_label.setText(GUI_TEXT["status_reading"])
 
-        worker = PlanWorker(path, settings)
-        worker.progress.connect(self._on_progress)
-        worker.succeeded.connect(self._on_succeeded)
-        worker.input_invalid.connect(self._on_input_invalid)
-        worker.cancelled.connect(self._on_cancelled)
-        worker.crashed.connect(self._on_crashed)
+        # Step 1: read (in the background). Planning starts from what was read,
+        # once _on_thread_finished has checked for pieces longer than the stock.
+        reader = ReadWorker(path)
+        reader.read.connect(self._on_read)
+        reader.input_invalid.connect(self._on_input_invalid)
+        reader.cancelled.connect(self._on_cancelled)
+        reader.crashed.connect(self._on_crashed)
+        self._pending_settings = settings
+        self._start_worker(reader)
+        self._status_base = GUI_TEXT["status_reading"]
+        self._status_since = time.monotonic()
+        self._status_timer.start()
+
+    def _start_worker(self, worker: PlanWorker | ReadWorker) -> None:
         self._worker = worker
         self._update_actions()
         self._thread = start_worker(worker)
         self._thread.finished.connect(self._on_thread_finished)
 
+    def _on_read(self, source: ReadResult) -> None:
+        self._pending_source = source
+
+    def _start_planning(self, source: ReadResult, settings: OptimizerSettings) -> None:
+        """Step 2: plan, unless pieces are longer than every stock length and the
+        user prefers to change the lengths first."""
+        oversized = planner.oversized_pieces(source.pieces, settings.stock_lengths_mm)
+        if oversized:
+            pieces = sum(p.quantity for p in oversized)
+            self._log(GUI_TEXT["log_oversize"].format(rows=len(oversized), pieces=pieces))
+            if not self._confirm_oversize(oversized, max(settings.stock_lengths_mm)):
+                self._log(GUI_TEXT["log_oversize_stop"])
+                self._stop_status_ticks()
+                animations.animate_progress(self.progress_bar, 0)
+                self.status_label.setText(GUI_TEXT["status_stopped_oversize"])
+                # After the dialog closes Qt restores the previous focus; focus the
+                # stock field once that has happened so typing replaces the lengths.
+                QTimer.singleShot(0, self._focus_stock_field)
+                return
+            self._log(GUI_TEXT["log_oversize_continue"])
+        worker = PlanWorker(Path(self.input_edit.text().strip()), settings, source=source)
+        worker.progress.connect(self._on_progress)
+        worker.succeeded.connect(self._on_succeeded)
+        worker.input_invalid.connect(self._on_input_invalid)
+        worker.cancelled.connect(self._on_cancelled)
+        worker.crashed.connect(self._on_crashed)
+        self._start_worker(worker)
+        self._status_timer.start()
+
+    def _focus_stock_field(self) -> None:
+        self.activateWindow()
+        self.stock_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.stock_edit.selectAll()
+
+    def _confirm_oversize(self, oversized: Sequence[Piece], longest_stock_mm: int) -> bool:
+        """Ask whether to plan anyway; ``True`` = continue. Stop is the default."""
+        items = [
+            GUI_TEXT["oversize_item"].format(
+                size=p.size, no=p.no, length_m=format_metres(p.length_mm), quantity=p.quantity
+            )
+            for p in oversized[:OVERSIZE_LIST_LIMIT]
+        ]
+        if len(oversized) > OVERSIZE_LIST_LIMIT:
+            items.append(
+                GUI_TEXT["oversize_more"].format(count=len(oversized) - OVERSIZE_LIST_LIMIT)
+            )
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(GUI_TEXT["oversize_title"])
+        box.setText(
+            GUI_TEXT["oversize_text"].format(
+                rows=len(oversized),
+                pieces=sum(p.quantity for p in oversized),
+                longest_m=format_metres(longest_stock_mm),
+            )
+        )
+        box.setInformativeText(
+            GUI_TEXT["oversize_info"].format(
+                needed_m=format_metres(max(p.length_mm for p in oversized)),
+                items="\n".join(items),
+            )
+        )
+        go_on = box.addButton(GUI_TEXT["oversize_continue"], QMessageBox.ButtonRole.AcceptRole)
+        stop = box.addButton(GUI_TEXT["oversize_stop"], QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(stop)
+        box.setEscapeButton(stop)
+        box.exec()
+        return box.clickedButton() is go_on
+
     def cancel_computation(self) -> None:
         if self._worker is not None:
             self._worker.cancel()
-            self.status_label.setText(GUI_TEXT["status_cancelling"])
+            self._set_running_status(GUI_TEXT["status_cancelling"])
             self.cancel_button.setEnabled(False)
 
     def wait_for_worker(self, timeout_ms: int = 10_000) -> bool:
@@ -581,12 +761,40 @@ class MainWindow(QMainWindow):
         animations.animate_progress(self.progress_bar, round(event.fraction * PROGRESS_MAX))
         params = {"size": event.size, "index": event.index + 1, "total": event.total}
         if event.kind is ProgressKind.SIZE_STARTED:
-            animations.set_text_faded(self.status_label, GUI_TEXT["status_size"].format(**params))
+            self._set_running_status(GUI_TEXT["status_size"].format(**params))
             self._log(GUI_TEXT["log_size_started"].format(**params))
+        elif event.kind is ProgressKind.STAGE and event.stage is not None:
+            stage = th.STAGE_LABELS[event.stage]
+            step = th.stage_step_text(event.step, event.steps)
+            self._set_running_status(
+                GUI_TEXT["status_stage"].format(stage=stage, step=step, **params)
+            )
+            self._log(GUI_TEXT["log_stage"].format(size=event.size, stage=stage, step=step))
         else:
             self._log(GUI_TEXT["log_size_finished"].format(**params))
 
+    def _set_running_status(self, text: str) -> None:
+        """Show ``text``; the tick timer appends the seconds spent on it."""
+        self._status_base = text
+        self._status_since = time.monotonic()
+        animations.set_text_faded(self.status_label, text)
+
+    def _stop_status_ticks(self) -> None:
+        """The run has an outcome: the final status text must not be overwritten."""
+        self._status_timer.stop()
+        self._status_base = ""
+
+    def _tick_status(self) -> None:
+        if not self.is_busy() or not self._status_base:
+            return
+        seconds = int(time.monotonic() - self._status_since)
+        if seconds >= STATUS_ELAPSED_AFTER_S:
+            self.status_label.setText(
+                self._status_base + GUI_TEXT["elapsed"].format(seconds=seconds)
+            )
+
     def _on_succeeded(self, outcome: PlanOutcome) -> None:
+        self._stop_status_ticks()
         self._outcome = outcome
         self._last_saved = None
         self.saved_label.clear()
@@ -595,6 +803,7 @@ class MainWindow(QMainWindow):
         self._show_results(outcome)
 
     def _on_input_invalid(self, exc: InputValidationError | SettingsError) -> None:
+        self._stop_status_ticks()
         self.status_label.setText(GUI_TEXT["status_failed"])
         header = (
             GUI_TEXT["error_input_header"]
@@ -604,10 +813,12 @@ class MainWindow(QMainWindow):
         self._show_issues(header, exc.issues)
 
     def _on_cancelled(self) -> None:
+        self._stop_status_ticks()
         animations.animate_progress(self.progress_bar, 0)
         animations.set_text_faded(self.status_label, GUI_TEXT["status_cancelled"])
 
     def _on_crashed(self, message: str) -> None:
+        self._stop_status_ticks()
         self.status_label.setText(GUI_TEXT["status_failed"])
         self._log(message)
         text = GUI_TEXT["unexpected"].format(log_path=self._log_path or "-")
@@ -617,6 +828,14 @@ class MainWindow(QMainWindow):
         # Only now is it safe to drop the last references to the thread and worker.
         self._worker = None
         self._thread = None
+        source, settings = self._pending_source, self._pending_settings
+        self._pending_source = None
+        self._pending_settings = None
+        if source is not None and settings is not None:
+            self._start_planning(source, settings)  # reading done: on to step 2
+            if self._worker is not None:
+                return
+        self._stop_status_ticks()
         self.cancel_button.setEnabled(True)
         self._update_actions()
 
@@ -626,8 +845,12 @@ class MainWindow(QMainWindow):
         has = outcome is not None
         self.empty_label.setVisible(not has)
         result_widgets = (
+            self.source_label,
             self.summary_card,
             self.size_table,
+            self.bar_counts_title,
+            self.copy_counts_button,
+            self.bar_counts_list,
             self.preview_tabs,
             self.warnings_title,
             self.warnings_list,
@@ -645,6 +868,7 @@ class MainWindow(QMainWindow):
         if outcome is None:
             return
         plan = outcome.plan
+        self.source_label.setText(result_source_text(outcome, datetime.now()))
         totals = plan_totals(plan)
         values = self.metric_values
         stock_text = GUI_TEXT["metres"].format(value=format_metres(totals.stock_mm))
@@ -706,21 +930,41 @@ class MainWindow(QMainWindow):
                 if column == 4 and size_plan.groups:
                     item.setToolTip(th.STATUS_LABELS[size_plan.status])
                 self.size_table.setItem(row, column, item)
+        fit_table_height(self.size_table, MAX_VISIBLE_SIZE_ROWS)
 
-        self._show_previews(plan)
+        self.bar_counts_list.clear()
+        self.bar_counts_list.addItems(
+            [
+                th.format_bar_count(c.size, c.count, c.stock_length_mm, c.inventory)
+                for c in bar_counts(plan)
+            ]
+            or [th.NONE_TEXT]
+        )
+        fit_list_height(self.bar_counts_list, MAX_VISIBLE_COUNT_ROWS)
+
+        self._show_previews(plan, outcome.previews)
 
         self.warnings_list.clear()
         messages = [th.format_issue(i) for i in (*outcome.source.warnings, *plan.issues)]
         self.warnings_list.addItems(messages or [th.NONE_TEXT])
+        fit_list_height(self.warnings_list, MAX_VISIBLE_WARNING_ROWS)
 
-    def _show_previews(self, plan: CuttingPlan) -> None:
+    def copy_bar_counts(self) -> None:
+        """Copy the per-size, per-length lines, e.g. to paste into an order."""
+        lines = [self.bar_counts_list.item(i).text() for i in range(self.bar_counts_list.count())]
+        QGuiApplication.clipboard().setText("\n".join(lines))
+        self.toast.show_message(GUI_TEXT["copied"])
+
+    def _show_previews(self, plan: CuttingPlan, prepared: Sequence[PreviewData] = ()) -> None:
         self.preview_tabs.clear()
         self.previews = []
         stocks = [g.bar.stock_length_mm for sp in plan.sizes for g in sp.groups]
         longest = max(stocks, default=1)
-        for size_plan in plan.sizes:
+        if len(prepared) != len(plan.sizes):
+            prepared = [prepare_preview(sp) for sp in plan.sizes]
+        for size_plan, data in zip(plan.sizes, prepared, strict=True):
             preview = PlanPreview(self._theme)
-            preview.set_plan(size_plan, max_stock_mm=longest)
+            preview.set_plan(size_plan, max_stock_mm=longest, prepared=data)
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -735,9 +979,13 @@ class MainWindow(QMainWindow):
         stamp = datetime.now().strftime("%Y%m%d_%H%M")
         return folder / GUI_TEXT["default_output"].format(stamp=stamp)
 
-    def save_result(self, path: Path | None = None) -> bool:
-        """Write the current result; returns ``True`` on success. Never recomputes."""
-        if self._outcome is None:
+    def save_result(self, path: Path | None = None, *, wait: bool = False) -> bool:
+        """Save the current result in the background (never recomputes).
+
+        Returns whether saving started; with ``wait=True`` it blocks (running the
+        event loop) until done and returns whether the file was written.
+        """
+        if self._outcome is None or self.is_busy():
             return False
         if path is None:
             name, _ = QFileDialog.getSaveFileName(
@@ -750,29 +998,68 @@ class MainWindow(QMainWindow):
                 return False
             path = Path(name)
         source = self._outcome.source
-        try:
-            written = write_plan(
-                path,
-                self._outcome.plan,
-                WriteSource(
-                    source.pieces,
-                    source.table,
-                    source.path,
-                    source.warnings,
-                    inventory=source.inventory,
-                    inventory_sheet=source.inventory_sheet,
-                ),
-            )
-        except OutputWriteError as exc:
-            self._show_issues(GUI_TEXT["error_output_header"], exc.issues)
-            return False
+        worker = SaveWorker(
+            path,
+            self._outcome.plan,
+            WriteSource(
+                source.pieces,
+                source.table,
+                source.path,
+                source.warnings,
+                inventory=source.inventory,
+                inventory_sheet=source.inventory_sheet,
+            ),
+        )
+        worker.saved.connect(self._on_saved)
+        worker.failed.connect(self._on_save_failed)
+        worker.crashed.connect(self._on_save_crashed)
+        self._save_worker = worker
+        self._save_succeeded = False
+        self.progress_bar.setRange(0, 0)  # busy: openpyxl reports no progress
+        self._set_running_status(GUI_TEXT["status_saving"])
+        self._status_timer.start()
+        self._update_actions()
+        self._save_thread = start_worker(worker)
+        self._save_thread.finished.connect(self._on_save_thread_finished)
+        if not wait:
+            return True
+        loop = QEventLoop()
+        self._save_thread.finished.connect(loop.quit)
+        if self._save_thread is not None and self._save_thread.isRunning():
+            loop.exec()
+        QCoreApplication.processEvents()  # deliver _on_save_thread_finished
+        return self._save_succeeded
+
+    def _end_save_status(self, text: str) -> None:
+        self._stop_status_ticks()
+        self.progress_bar.setRange(0, PROGRESS_MAX)
+        self.progress_bar.setValue(PROGRESS_MAX)
+        self.status_label.setText(text)
+
+    def _on_saved(self, written: Path) -> None:
+        self._save_succeeded = True
+        self._end_save_status(GUI_TEXT["status_saved"])
         self._last_saved = written
         self._user.last_output_dir = str(written.parent)
         self.saved_label.setText(GUI_TEXT["saved"].format(path=written))
-        self.toast.show_message(GUI_TEXT["saved"].format(path=written.name))
         self.saved_label.setToolTip(str(written))
+        self.toast.show_message(GUI_TEXT["saved"].format(path=written.name))
+
+    def _on_save_failed(self, exc: OutputWriteError) -> None:
+        self._end_save_status(GUI_TEXT["status_save_failed"])
+        self._show_issues(GUI_TEXT["error_output_header"], exc.issues)
+
+    def _on_save_crashed(self, message: str) -> None:
+        self._end_save_status(GUI_TEXT["status_save_failed"])
+        self._log(message)
+        text = GUI_TEXT["unexpected"].format(log_path=self._log_path or "-")
+        self._open_dialog(IssuesDialog(self, GUI_TEXT["unexpected_title"], text, [message]))
+
+    def _on_save_thread_finished(self) -> None:
+        # As with computing: drop the references only once the thread has ended.
+        self._save_worker = None
+        self._save_thread = None
         self._update_actions()
-        return True
 
     def _open_saved_file(self) -> None:
         if self._last_saved is not None:
@@ -802,5 +1089,8 @@ class MainWindow(QMainWindow):
         if self._worker is not None:
             self._worker.cancel()
             self.wait_for_worker()
+        if self._save_thread is not None:
+            # A half-written file would be worse than a short wait; saving cannot be cancelled.
+            self._save_thread.wait()
         self.save_user_settings()
         super().closeEvent(event)

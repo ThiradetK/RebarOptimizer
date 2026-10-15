@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QPalette
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 FONT_FAMILIES = ["Segoe UI", "Leelawadee UI", "Tahoma"]
 """Segoe UI first; Leelawadee UI covers Thai glyphs on Windows."""
 FONT_POINT_SIZE = 10
+RESOURCES = Path(__file__).resolve().parent / "resources"
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,8 @@ class Theme:
     text: str
     text_muted: str
     border: str
+    indicator: str
+    """Outline of unchecked radio buttons and checkboxes (must stand out from surface)."""
     accent: str
     accent_text: str
     danger: str
@@ -39,6 +43,7 @@ LIGHT = Theme(
     text="#1f2328",
     text_muted="#5c6370",
     border="#d0d4da",
+    indicator="#8a919c",
     accent="#1f6feb",
     accent_text="#ffffff",
     danger="#c62828",
@@ -56,6 +61,7 @@ DARK = Theme(
     text="#e6e7e9",
     text_muted="#a3a8b0",
     border="#44484f",
+    indicator="#9aa0a8",
     accent="#4c8dff",
     accent_text="#ffffff",
     danger="#ef6b6b",
@@ -84,6 +90,7 @@ def app_font() -> QFont:
 
 def stylesheet(theme: Theme) -> str:
     t = theme
+    check_icon = (RESOURCES / "check.svg").as_posix()  # QSS url() needs forward slashes
     return f"""
 QWidget {{ color: {t.text}; }}
 QMainWindow, QDialog {{ background: {t.window}; }}
@@ -101,6 +108,26 @@ QLineEdit, QPlainTextEdit, QTableWidget, QListWidget {{
 }}
 QLineEdit[invalid="true"] {{ border: 1px solid {t.danger}; background: {t.danger_surface}; }}
 QLabel#fieldError {{ color: {t.danger}; }}
+/* Fusion outlines indicators with a darker shade of the window colour, which
+   vanishes on a dark window: draw them explicitly in both themes. */
+QRadioButton::indicator, QCheckBox::indicator {{
+    width: 14px; height: 14px; border: 1px solid {t.indicator}; background: {t.surface};
+}}
+QRadioButton::indicator {{ border-radius: 8px; }}
+QCheckBox::indicator {{ border-radius: 3px; }}
+QRadioButton::indicator:hover, QCheckBox::indicator:hover {{ border-color: {t.accent}; }}
+QRadioButton::indicator:checked {{
+    border-color: {t.accent};
+    background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+        stop:0 {t.accent}, stop:0.45 {t.accent}, stop:0.55 {t.surface}, stop:1 {t.surface});
+}}
+QCheckBox::indicator:checked {{
+    border-color: {t.accent}; background: {t.accent}; image: url("{check_icon}");
+}}
+QSpinBox:disabled, QDoubleSpinBox:disabled, QLineEdit:disabled {{ color: {t.text_muted}; }}
+QRadioButton::indicator:disabled, QCheckBox::indicator:disabled {{
+    border-color: {t.border}; background: {t.surface_alt};
+}}
 QLabel#muted {{ color: {t.text_muted}; }}
 QPushButton {{
     background: {t.surface_alt}; border: 1px solid {t.border};

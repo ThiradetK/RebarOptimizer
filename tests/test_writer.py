@@ -312,3 +312,54 @@ def test_cli_writes_output_even_with_unplaced(make_xlsx: MakeXlsx, tmp_path: Pat
     assert main([str(path), "--stock", "12", "-o", str(out)]) == EXIT_UNPLACED
     workbook = openpyxl.load_workbook(out)
     assert rows(workbook[th.SHEET_NAMES["unplaced"]])[0][:2] == ("DB12", "1")
+
+
+def test_bar_counts_sheet_lists_each_size_and_length(
+    template_output: tuple[CuttingPlan, openpyxl.Workbook],
+) -> None:
+    plan, workbook = template_output
+    lines = [r[0] for r in rows(workbook[th.SHEET_NAMES["bar_counts"]])]
+    expected = [
+        f"Size {sp.size} จำนวน {n} เส้น เหล็ก {th.format_metres_short(stock)} เมตร"
+        for sp in plan.sizes
+        for stock, n in sorted(
+            (
+                g.bar.stock_length_mm,
+                sum(h.count for h in sp.groups if h.bar.stock_length_mm == g.bar.stock_length_mm),
+            )
+            for g in sp.groups
+        )
+    ]
+    assert lines == list(dict.fromkeys(expected))
+
+
+def test_workbook_styling(
+    template_output: tuple[CuttingPlan, openpyxl.Workbook], tmp_path: Path
+) -> None:
+    _, workbook = template_output
+    summary = workbook[th.SHEET_NAMES["summary"]]
+    header = summary["A1"]
+    assert header.font.bold and header.fill.fgColor.rgb.endswith("1F4E78")
+    assert header.alignment.wrap_text
+    last = summary.max_row
+    assert summary.cell(row=last, column=1).value == th.TOTAL_TEXT
+    assert summary.cell(row=last, column=1).fill.fgColor.rgb.endswith("DDEBF7")
+    assert summary["A2"].border.left.style == "thin"
+    counts = workbook[th.SHEET_NAMES["bar_counts"]]
+    longest = max(len(str(c.value)) for c in counts["A"][1:])
+    assert (counts.column_dimensions["A"].width or 0) >= longest
+    assert counts.sheet_properties.tabColor is not None
+    for sheet in workbook.worksheets:
+        assert sheet.page_setup.orientation == "landscape"
+
+
+def test_failed_check_is_red(tmp_path: Path) -> None:
+    pieces = [Piece("DB12", "1", 3000, 3, (2,))]
+    plan = planner.plan(pieces, OptimizerSettings(stock_lengths_mm=(12000,)))
+    lying = [replace(pieces[0], quantity=4)]
+    table = InputTable(headers=(), row_numbers=(), rows=())
+    path = write_plan(tmp_path / "o.xlsx", plan, WriteSource(lying, table), FIXED_TIME)
+    cell = openpyxl.load_workbook(path)[th.SHEET_NAMES["check"]]["F2"]
+    assert cell.value == th.CHECK_FAIL
+    assert cell.font.color.rgb.endswith("C00000")
+    assert cell.alignment.horizontal == "center"

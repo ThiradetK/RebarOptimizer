@@ -19,7 +19,6 @@ import logging
 import math
 import threading
 import time
-from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -29,9 +28,12 @@ from rebar_optimizer.domain.errors import Cancelled
 from rebar_optimizer.domain.models import SolveStatus, StockSource
 from rebar_optimizer.services.cancel import CancelToken, check_cancelled
 from rebar_optimizer.solver.base import NO_INVENTORY, Demand, Inventory, RawBar, SolveResult
-from rebar_optimizer.solver.patterns import Pattern, PatternSet, pattern_of
+from rebar_optimizer.solver.patterns import Pattern, PatternSet, pattern_counts
 
 logger = logging.getLogger(__name__)
+
+BUILD_CANCEL_EVERY = 2048
+"""Patterns added between cancel checks while building the model."""
 
 CANCEL_POLL_S = 0.1
 PURCHASE_SHARE_OF_TIME = 0.7
@@ -83,16 +85,17 @@ def solve_patterns(
     )
     divisor = math.gcd(*(p.stock_length_mm for p in patterns))
 
-    model, variables = _build_model(demand, lengths, patterns, inventory)
+    model, variables = _build_model(demand, lengths, patterns, inventory, cancel)
 
     def cost(source: StockSource) -> cp_model.LinearExprT:
-        return sum(
-            (p.stock_length_mm // divisor) * x
+        chosen = [
+            (x, p.stock_length_mm // divisor)
             for p, x in zip(patterns, variables, strict=True)
             if p.source is source
-        )
+        ]
+        return cp_model.LinearExpr.weighted_sum([x for x, _ in chosen], [c for _, c in chosen])
 
-    hinted = Counter(pattern_of(bar, lengths) for bar in hint)
+    hinted = pattern_counts(hint, lengths)
     if hinted:
         for pattern, x in zip(patterns, variables, strict=True):
             model.add_hint(x, hinted.get(pattern, 0))
@@ -101,7 +104,10 @@ def solve_patterns(
     new_cost = cost(StockSource.NEW)
     model.minimize(new_cost)
     share = PURCHASE_SHARE_OF_TIME if two_phase else 1.0
-    phase = _run(model, variables, options, options.time_limit_s * share, cancel)
+    # ``time_limit_s`` covers this whole call: building a large model takes seconds.
+    building = time.monotonic() - started
+    phase_limit = max(MIN_PHASE_TIME_S, options.time_limit_s * share - building)
+    phase = _run(model, variables, options, phase_limit, cancel)
     if phase is None:
         return None
     _log("purchase", len(patterns), divisor, phase)
@@ -136,11 +142,19 @@ def _build_model(
     lengths: Sequence[int],
     patterns: Sequence[Pattern],
     inventory: Inventory,
+    cancel: CancelToken | None = None,
 ) -> tuple[cp_model.CpModel, list[cp_model.IntVar]]:
-    """Variables, demand rows and inventory limits; the objective is set per phase."""
+    """Variables, demand rows and inventory limits; the objective is set per phase.
+
+    Tens of thousands of patterns take seconds to add, so the cancel token is
+    polled while building, and rows use ``LinearExpr.weighted_sum`` (built in
+    C++) rather than Python ``sum`` over expressions.
+    """
     model = cp_model.CpModel()
     variables: list[cp_model.IntVar] = []
     for index, pattern in enumerate(patterns):
+        if index % BUILD_CANCEL_EVERY == 0:
+            check_cancelled(cancel)
         upper = max(
             math.ceil(demand[length] / count)
             for length, count in zip(lengths, pattern.counts, strict=True)
@@ -149,11 +163,15 @@ def _build_model(
         if pattern.source is StockSource.INVENTORY:
             upper = min(upper, inventory[pattern.stock_length_mm])
         variables.append(model.new_int_var(0, upper, f"x{index}"))
-    for i, length in enumerate(lengths):
-        model.add(
-            sum(p.counts[i] * x for p, x in zip(patterns, variables, strict=True) if p.counts[i])
-            >= demand[length]
-        )
+    rows: list[tuple[list[cp_model.IntVar], list[int]]] = [([], []) for _ in lengths]
+    for pattern, x in zip(patterns, variables, strict=True):
+        for i, count in enumerate(pattern.counts):
+            if count:
+                rows[i][0].append(x)
+                rows[i][1].append(count)
+    check_cancelled(cancel)
+    for (row_vars, row_counts), length in zip(rows, lengths, strict=True):
+        model.add(cp_model.LinearExpr.weighted_sum(row_vars, row_counts) >= demand[length])
     for stock, available in inventory.items():
         on_stock = [
             x

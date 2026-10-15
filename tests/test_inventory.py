@@ -12,7 +12,12 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from rebar_optimizer.cli import EXIT_OK, main
-from rebar_optimizer.domain.errors import InputValidationError, InvariantViolation, IssueCode
+from rebar_optimizer.domain.errors import (
+    InputValidationError,
+    InvariantViolation,
+    Issue,
+    IssueCode,
+)
 from rebar_optimizer.domain.models import (
     BarGroup,
     CuttingPlan,
@@ -29,6 +34,7 @@ from rebar_optimizer.io.writer import WriteSource, write_plan
 from rebar_optimizer.services import planner
 from rebar_optimizer.services.invariants import verify_plan
 from rebar_optimizer.services.postprocess import assign_stock
+from rebar_optimizer.services.summary import bar_counts
 from rebar_optimizer.solver.base import RawBar, stock_cost
 from rebar_optimizer.solver.greedy import GreedySolver
 
@@ -411,3 +417,33 @@ def test_cli_reports_inventory(tmp_path: Path, capsys: pytest.CaptureFixture[str
     assert "ใช้จากคงคลัง: 6.000 ม. × 2 เส้น" in out
     assert "สั่งซื้อ: 7.000 ม. × 1 เส้น" in out
     assert "ซื้อใหม่ 7.000 ม. | ใช้จากคงคลัง 12.000 ม." in out
+
+
+def test_bar_counts_list_purchase_then_inventory() -> None:
+    result = planner.plan(
+        [Piece("DB12", "1", 6000, 3, (2,))], settings_(7000), inventory=[stock("DB12", 6000, 2)]
+    )
+    lines = [
+        th.format_bar_count(c.size, c.count, c.stock_length_mm, c.inventory)
+        for c in bar_counts(result)
+    ]
+    assert lines == [
+        "Size DB12 จำนวน 1 เส้น เหล็ก 7 เมตร",
+        "Size DB12 จำนวน 2 เส้น เหล็ก 6 เมตร (คงคลัง)",
+    ]
+
+
+def test_format_metres_short() -> None:
+    assert [th.format_metres_short(v) for v in (10000, 7300, 3505, 500)] == [
+        "10",
+        "7.3",
+        "3.505",
+        "0.5",
+    ]
+
+
+def test_pattern_limit_warning_does_not_claim_a_status() -> None:
+    message = th.format_issue(
+        Issue.warning(IssueCode.PATTERN_LIMIT_EXCEEDED, size="DB12", max_patterns=5)
+    )
+    assert "HEURISTIC" not in message and "gap" in message

@@ -9,8 +9,10 @@ the target folder and then renamed, so a failed save never leaves a half file.
 from __future__ import annotations
 
 import contextlib
+import copy
 import os
 import tempfile
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -18,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 import openpyxl
-from openpyxl.styles import Font
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -35,13 +37,31 @@ from rebar_optimizer.domain.models import (
 from rebar_optimizer.domain.weights import unit_weight_kg_per_m
 from rebar_optimizer.i18n import th
 from rebar_optimizer.io.reader import InputTable
-from rebar_optimizer.services.summary import SizeSummary, bar_detail, cut_runs, summarize_size
+from rebar_optimizer.services.summary import (
+    SizeSummary,
+    bar_counts,
+    cut_runs,
+    group_details,
+    summarize_size,
+)
 
 METRE_FORMAT = "0.000"
 KG_FORMAT = "0.0"
 PERCENT_FORMAT = "0.0%"
 MAX_COLUMN_WIDTH = 60
+HEADER_EXTRA_WIDTH = 3
+"""Room for the autofilter button next to a header."""
 _BOLD = Font(bold=True)
+_HEADER_FONT = Font(bold=True, color="FFFFFF")
+_HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
+_TOTAL_FILL = PatternFill("solid", fgColor="DDEBF7")
+_THIN = Side(style="thin", color="BFBFBF")
+_BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+_HEADER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
+_CENTER = Alignment(horizontal="center", vertical="center")
+_WRAP = Alignment(vertical="top", wrap_text=True)
+_FAIL_FONT = Font(bold=True, color="C00000")
+_TAB_COLORS = {"bar_counts": "2E75B6", "purchase": "2E75B6", "unplaced": "C00000"}
 
 
 @dataclass(frozen=True)
@@ -86,6 +106,7 @@ def build_workbook(
     _plan_sheet(workbook, plan)
     _details_sheet(workbook, plan)
     _summary_sheet(workbook, plan, summaries, weights)
+    _bar_counts_sheet(workbook, plan)
     _purchase_sheet(workbook, summaries, weights)
     _inventory_sheet(workbook, plan, source.inventory, weights)
     _remnants_sheet(workbook, plan)
@@ -103,8 +124,8 @@ def build_workbook(
 def _plan_sheet(workbook: openpyxl.Workbook, plan: CuttingPlan) -> None:
     rows: list[Row] = []
     for size_plan in plan.sizes:
-        for index, group in enumerate(size_plan.groups, start=1):
-            detail = bar_detail(group, size_plan.kerf_mm, size_plan.piece_lengths_mm)
+        details = group_details(size_plan)
+        for index, (group, detail) in enumerate(zip(size_plan.groups, details, strict=True), 1):
             usage = detail.usage
             rows.append(
                 (
@@ -122,17 +143,12 @@ def _plan_sheet(workbook: openpyxl.Workbook, plan: CuttingPlan) -> None:
                     _m(detail.longest_cuttable_mm),
                 )
             )
-    sheet = _table_sheet(
+    _table_sheet(
         workbook,
         "plan",
         rows,
         {3: METRE_FORMAT, 7: METRE_FORMAT, 8: METRE_FORMAT, 9: METRE_FORMAT, 11: METRE_FORMAT},
     )
-    sheet.page_setup.orientation = "landscape"
-    sheet.page_setup.fitToWidth = 1
-    sheet.page_setup.fitToHeight = 0
-    sheet.sheet_properties.pageSetUpPr.fitToPage = True
-    sheet.print_title_rows = "1:1"
 
 
 def _details_sheet(workbook: openpyxl.Workbook, plan: CuttingPlan) -> None:
@@ -218,6 +234,19 @@ def _summary_sheet(
     sheet = _table_sheet(workbook, "summary", rows, formats)
     if rows:
         _bold_row(sheet, len(rows) + 1)
+
+
+def _bar_counts_sheet(workbook: openpyxl.Workbook, plan: CuttingPlan) -> None:
+    """One sentence per size and stock length, the same lines as the CLI and GUI."""
+    rows: list[Row] = [
+        (th.format_bar_count(c.size, c.count, c.stock_length_mm, c.inventory),)
+        for c in bar_counts(plan)
+    ]
+    sheet = _table_sheet(workbook, "bar_counts", rows, {}, autofilter=False)
+    for row_cells in sheet.iter_rows(min_row=2):
+        for cell in row_cells:
+            cell.font = Font(size=12)
+    _fit_columns(sheet, data_scale=12 / 11)
 
 
 def _purchase_sheet(
@@ -402,14 +431,20 @@ def _status_sheet(
     rows.append((labels["warnings"], messages[0] if messages else th.NONE_TEXT))
     rows.extend((None, message) for message in messages[1:])
     sheet = _table_sheet(workbook, "status", rows, {}, autofilter=False)
-    sheet.column_dimensions["B"].width = MAX_COLUMN_WIDTH * 2
+    sheet.column_dimensions["B"].width = MAX_COLUMN_WIDTH * 1.5
+    for row_cells in sheet.iter_rows(min_row=2):
+        row_cells[0].font = _BOLD
+        row_cells[0].alignment = Alignment(vertical="top")
+        row_cells[1].alignment = _WRAP
 
 
 def _input_sheet(workbook: openpyxl.Workbook, table: InputTable) -> None:
     sheet = workbook.create_sheet(th.SHEET_NAMES["input"])
-    _append(sheet, (th.INPUT_ROW_HEADER, *table.headers))
-    for row_number, values in zip(table.row_numbers, table.rows, strict=True):
-        _append(sheet, (row_number, *values))
+    _append(sheet, (th.INPUT_ROW_HEADER, *table.headers), 1)
+    for offset, (row_number, values) in enumerate(
+        zip(table.row_numbers, table.rows, strict=True), start=2
+    ):
+        _append(sheet, (row_number, *values), offset)
     _finish(sheet, autofilter=True)
 
 
@@ -424,23 +459,29 @@ def _table_sheet(
     autofilter: bool = True,
 ) -> Worksheet:
     sheet = workbook.create_sheet(th.SHEET_NAMES[key])
-    _append(sheet, th.HEADERS[key])
+    _append(sheet, th.HEADERS[key], 1)
     if not rows:
         sheet.append((th.NONE_TEXT,))
-    for row in rows:
-        _append(sheet, row)
+    for row_index, row in enumerate(rows, start=2):
+        _append(sheet, row, row_index)
         for column, number_format in formats.items():
-            sheet.cell(row=sheet.max_row, column=column + 1).number_format = number_format
+            sheet.cell(row=row_index, column=column + 1).number_format = number_format
     _finish(sheet, autofilter=autofilter and bool(rows))
     return sheet
 
 
-def _append(sheet: Worksheet, values: Iterable[object]) -> None:
-    sheet.append([_cell_value(v) for v in values])
+def _append(sheet: Worksheet, values: Iterable[object], row: int) -> None:
+    """Append ``values`` as Excel row ``row`` (the caller counts rows).
+
+    Never use ``sheet.max_row`` per row: openpyxl computes it by scanning every
+    cell, which made a 100,000-row input take over ten minutes to save.
+    """
+    cells = [_cell_value(v) for v in values]
+    sheet.append(cells)
     # Text that starts with "=" must stay text, not become a formula.
-    for cell in sheet[sheet.max_row]:
-        if isinstance(cell.value, str) and cell.value.startswith("="):
-            cell.data_type = "s"
+    for column, value in enumerate(cells, start=1):
+        if isinstance(value, str) and value.startswith("="):
+            sheet.cell(row=row, column=column).data_type = "s"
 
 
 def _cell_value(value: object) -> object:
@@ -450,25 +491,89 @@ def _cell_value(value: object) -> object:
 
 
 def _finish(sheet: Worksheet, autofilter: bool) -> None:
+    """Header band, grid, centred ✓/✗, column widths, frozen header and print setup."""
     for cell in sheet[1]:
-        cell.font = _BOLD
+        cell.font = _HEADER_FONT
+        cell.fill = _HEADER_FILL
+        cell.alignment = _HEADER_ALIGN
+        cell.border = _BORDER
+    sheet.row_dimensions[1].height = 24
+    _style_data_cells(sheet)
     sheet.freeze_panes = "A2"
     if autofilter and sheet.max_row > 1:
         sheet.auto_filter.ref = sheet.dimensions
-    widths: dict[int, int] = {}
-    for row in sheet.iter_rows():
-        for cell in row:
-            if cell.value is None:
+    _fit_columns(sheet)
+    color = next((c for key, c in _TAB_COLORS.items() if th.SHEET_NAMES[key] == sheet.title), None)
+    if color:
+        sheet.sheet_properties.tabColor = color
+    sheet.page_setup.orientation = "landscape"
+    sheet.page_setup.fitToWidth = 1
+    sheet.page_setup.fitToHeight = 0
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    sheet.print_title_rows = "1:1"
+
+
+def _style_data_cells(sheet: Worksheet) -> None:
+    """Grid on every data cell; ✓/✗ centred and ✗ red.
+
+    Assigning a style object makes openpyxl hash it for every cell, which took
+    about a minute per sheet for ~90,000 rows. Each distinct (existing style,
+    kind) is styled once and its style ids are copied to the other cells.
+    """
+    done: dict[tuple[tuple[int, ...], int], object] = {}
+    for row_cells in sheet.iter_rows(min_row=2):
+        for cell in row_cells:
+            value = cell.value
+            kind = 2 if value == th.CHECK_FAIL else 1 if value == th.CHECK_OK else 0
+            style = cell._style  # None until the cell is first styled
+            key = (tuple(style) if style is not None else (), kind)
+            styled = done.get(key)
+            if styled is not None:
+                cell._style = copy.copy(styled)
                 continue
-            text = f"{cell.value:.3f}" if isinstance(cell.value, float) else str(cell.value)
-            widths[cell.column] = max(widths.get(cell.column, 0), len(text))
+            cell.border = _BORDER
+            if kind:
+                cell.alignment = _CENTER
+                if kind == 2:
+                    cell.font = _FAIL_FONT
+            done[key] = copy.copy(cell._style)
+
+
+def _fit_columns(sheet: Worksheet, data_scale: float = 1.0) -> None:
+    """Widths from the longest value, header included. Thai has no spaces between
+    words, so Excel cannot wrap a Thai header: the column must fit all of it."""
+    widths: dict[int, float] = {}
+    measured: dict[object, float] = {}  # many cells repeat the same value
+    for row_index, values in enumerate(sheet.iter_rows(values_only=True), start=1):
+        for column, value in enumerate(values, start=1):
+            if value is None:
+                continue
+            width = measured.get(value)
+            if width is None:
+                text = f"{value:.3f}" if isinstance(value, float) else str(value)
+                width = measured[value] = _display_width(text)
+            if row_index == 1:
+                width = width * 1.15 + HEADER_EXTRA_WIDTH  # bold text plus filter button
+            else:
+                width *= data_scale
+            if width > widths.get(column, 0.0):
+                widths[column] = width
     for column, width in widths.items():
-        sheet.column_dimensions[get_column_letter(column)].width = min(width + 2, MAX_COLUMN_WIDTH)
+        letter = get_column_letter(column)
+        sheet.column_dimensions[letter].width = min(round(width + 3, 1), MAX_COLUMN_WIDTH)
+
+
+def _display_width(text: str) -> float:
+    """Approximate width in Excel character units. Thai vowel and tone marks
+    above or below a consonant take no width of their own."""
+    return float(sum(0 if unicodedata.combining(ch) else 1 for ch in text))
 
 
 def _bold_row(sheet: Worksheet, row: int) -> None:
+    """Subtotal / total row."""
     for cell in sheet[row]:
         cell.font = _BOLD
+        cell.fill = _TOTAL_FILL
 
 
 def _m(length_mm: int | None) -> float | None:

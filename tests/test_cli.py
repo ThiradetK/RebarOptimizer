@@ -87,3 +87,14 @@ def test_unexpected_error_exit_3_and_logged(
     monkeypatch.setattr("rebar_optimizer.services.planner.plan", boom)
     assert main([str(make_xlsx([["DB12", 1, 1.0, 1]])), "--stock", "10"]) == EXIT_ERROR
     assert "log" in capsys.readouterr().err
+
+
+def test_bar_counts_per_size_and_length(tmp_path: Path, capsys: Capture) -> None:
+    path = write_template(tmp_path / "t.xlsx")
+    assert main([str(path), "--stock", "10,12"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "สรุปจำนวนเส้นแยกตาม Size และความยาว:" in out
+    lines = [line.strip() for line in out.splitlines() if line.strip().startswith("Size ")]
+    counted = [line for line in lines if "จำนวน" in line and line.endswith("เมตร")]
+    assert counted, out
+    assert all(line.split()[1] in {"DB12", "DB16", "RB9"} for line in counted)

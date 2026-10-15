@@ -5,6 +5,7 @@ from pathlib import Path
 
 import openpyxl
 import pytest
+from PySide6.QtGui import QGuiApplication
 from pytestqt.qtbot import QtBot
 
 from benchmarks.generate import PRESETS, make_pieces, write_xlsx
@@ -117,7 +118,14 @@ def test_successful_run_shows_results_and_saves(
     window.stock_edit.setText("10, 12")
     compute(qtbot, window)
     assert window.status_label.text() == GUI_TEXT["status_done"]
+    log = window.log_view.toPlainText()
+    for stage in ("จัดแผนเบื้องต้น", "ปรับแผนให้ใช้เศษ", "สรุปผล"):
+        assert stage in log
     assert window.size_table.rowCount() == 3
+    counts = [window.bar_counts_list.item(i).text() for i in range(window.bar_counts_list.count())]
+    assert counts and all(t.startswith("Size ") and t.endswith("เมตร") for t in counts)
+    window.copy_bar_counts()
+    assert QGuiApplication.clipboard().text() == "\n".join(counts)
     assert window.metric_values["total_stock"].text().endswith("ม.")
     assert window.metric_values["total_weight"].text().endswith("kg")
     assert not window.unplaced_banner.isVisible()
@@ -125,16 +133,35 @@ def test_successful_run_shows_results_and_saves(
     assert window.progress_bar.value() == window.progress_bar.maximum()
 
     out = tmp_path / "plan.xlsx"
-    assert window.save_result(out)
+    assert window.save_result(out, wait=True)
     assert out.is_file()
     assert openpyxl.load_workbook(out).sheetnames == list(SHEET_NAMES.values())
     assert window.open_file_button.isVisible()
+    assert window.status_label.text() == GUI_TEXT["status_saved"]
 
 
-def test_unplaced_banner(qtbot: QtBot, window: MainWindow, make_xlsx: MakeXlsx) -> None:
+def answer_oversize(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch, go_on: bool
+) -> list[tuple[list[str], int]]:
+    """Replace the blocking warning dialog; record what it would have shown."""
+    asked: list[tuple[list[str], int]] = []
+
+    def confirm(oversized: list[object], longest: int) -> bool:
+        asked.append(([p.no for p in oversized], longest))
+        return go_on
+
+    monkeypatch.setattr(window, "_confirm_oversize", confirm)
+    return asked
+
+
+def test_unplaced_banner(
+    qtbot: QtBot, window: MainWindow, make_xlsx: MakeXlsx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = answer_oversize(window, monkeypatch, go_on=True)
     window.choose_input(make_xlsx([["DB12", 1, 13.0, 2], ["DB12", 2, 3.0, 1]]))
     window.stock_edit.setText("12")
     compute(qtbot, window)
+    assert asked == [(["1"], 12000)]
     assert window.unplaced_banner.isVisible()
     assert "No 1" in window.unplaced_label.text()
     assert "2 ชิ้น" in window.unplaced_label.text()
@@ -186,8 +213,16 @@ def test_cancel(qtbot: QtBot, window: MainWindow, tmp_path: Path) -> None:
     assert window.cancel_button.isVisible()
     assert not window.stock_edit.isEnabled()  # form locked while computing
     qtbot.wait(1500)
+    # A long step shows which stage runs and how long it has taken so far.
+    assert "—" in window.status_label.text()
+    window._status_since -= 10  # pretend the current stage started 10 s ago
+    window._tick_status()
+    assert window.status_label.text().endswith("วินาที")
     window.cancel_button.click()
     qtbot.waitUntil(lambda: not window.is_running(), timeout=5_000)
+    assert window.status_label.text() == GUI_TEXT["status_cancelled"]
+    window._tick_status()  # a late tick must not overwrite the final status
+    qtbot.wait(1200)
     assert window.status_label.text() == GUI_TEXT["status_cancelled"]
     assert not window.save_button.isEnabled()
     assert window.stock_edit.isEnabled()
@@ -210,12 +245,12 @@ def test_locked_output_can_be_saved_again_without_recomputing(
 
     monkeypatch.setattr(os, "replace", locked)
     out = tmp_path / "plan.xlsx"
-    assert not window.save_result(out)
+    assert not window.save_result(out, wait=True)
     assert window.issues_dialog is not None
     assert "กรุณาปิดไฟล์ plan.xlsx" in window.issues_dialog.text.toPlainText()
 
     monkeypatch.setattr(os, "replace", real_replace)
-    assert window.save_result(out)
+    assert window.save_result(out, wait=True)
     assert window._outcome is plan_before
     assert out.is_file()
 
@@ -255,3 +290,152 @@ def test_template_button_fills_the_input(window: MainWindow, tmp_path: Path) -> 
     window.create_template(target)
     assert target.is_file()
     assert window.input_edit.text() == str(target)
+
+
+# --- stale results (never save a result for another input) ------------------------------
+
+
+def test_result_is_cleared_on_new_file_failed_run_and_clear(
+    qtbot: QtBot, window: MainWindow, tmp_path: Path, make_xlsx: MakeXlsx
+) -> None:
+    template = write_template(tmp_path / "t.xlsx")
+    bad = make_xlsx([["DB12", 1, "x", 1]])
+
+    def computed() -> None:
+        window.choose_input(template)
+        compute(qtbot, window)
+        assert window.save_button.isEnabled()
+        assert window.summary_card.isVisible()
+        assert "t.xlsx" in window.source_label.text()
+
+    computed()
+    window.choose_input(template)  # same file again: result kept
+    assert window.save_button.isEnabled()
+    window.choose_input(bad)
+    assert not window.save_button.isEnabled()
+    assert not window.summary_card.isVisible() and window.empty_label.isVisible()
+
+    computed()
+    window.choose_input(bad)
+    compute(qtbot, window)  # fails in the reader
+    assert not window.save_button.isEnabled()
+    assert window.save_result(tmp_path / "never.xlsx") is False
+    assert not (tmp_path / "never.xlsx").exists()
+
+    computed()
+    window.clear_form()
+    assert not window.save_button.isEnabled()
+
+
+def test_size_table_shows_every_size_without_scrolling(
+    qtbot: QtBot, window: MainWindow, make_xlsx: MakeXlsx
+) -> None:
+    sizes = ["DB10", "DB12", "DB16", "DB20", "DB25", "RB9"]
+    window.choose_input(make_xlsx([[s, i + 1, 3.0, 2] for i, s in enumerate(sizes)]))
+    compute(qtbot, window)
+    assert window.size_table.rowCount() == 6
+    qtbot.waitUntil(lambda: window.size_table.verticalScrollBar().maximum() == 0, timeout=2000)
+    count_bar = window.bar_counts_list.verticalScrollBar()
+    assert count_bar.maximum() == 0
+
+
+def test_saving_runs_in_the_background(
+    qtbot: QtBot, window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A large result takes minutes to write; the window must stay usable meanwhile."""
+    import threading
+
+    window.choose_input(write_template(tmp_path / "t.xlsx"))
+    compute(qtbot, window)
+    release = threading.Event()
+    real_write = __import__("rebar_optimizer.ui.worker", fromlist=["write_plan"]).write_plan
+
+    def slow_write(*args: object, **kwargs: object) -> Path:
+        release.wait(10)
+        return real_write(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("rebar_optimizer.ui.worker.write_plan", slow_write)
+    out = tmp_path / "slow.xlsx"
+    assert window.save_result(out)  # returns at once
+    assert window.is_saving()
+    assert not window.save_button.isEnabled()
+    assert not window.compute_button.isEnabled()
+    assert window.status_label.text().startswith(GUI_TEXT["status_saving"])
+    qtbot.wait(50)  # the GUI thread keeps processing events
+    release.set()
+    qtbot.waitUntil(lambda: not window.is_saving(), timeout=10_000)
+    assert out.is_file()
+    assert window.save_button.isEnabled() and window.compute_button.isEnabled()
+    assert window.status_label.text() == GUI_TEXT["status_saved"]
+
+
+def test_oversize_warning_stop_keeps_form_and_computes_nothing(
+    qtbot: QtBot, window: MainWindow, make_xlsx: MakeXlsx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = answer_oversize(window, monkeypatch, go_on=False)
+    window.choose_input(
+        make_xlsx([["DB12", 1, 13.0, 2], ["DB16", 2, 12.5, 1], ["DB12", 3, 3.0, 1]])
+    )
+    window.stock_edit.setText("10, 12")
+    compute(qtbot, window)
+    assert asked == [(["1", "2"], 12000)]
+    assert window.status_label.text() == GUI_TEXT["status_stopped_oversize"]
+    assert window._outcome is None
+    assert not window.save_button.isEnabled()
+    assert window.compute_button.isEnabled()
+    assert window.stock_edit.text() == "10, 12"  # nothing cleared
+    # Longer stock -> no question at all.
+    asked.clear()
+    window.stock_edit.setText("10, 14")
+    compute(qtbot, window)
+    assert asked == []
+    assert window._outcome is not None and not window._outcome.plan.unplaced
+
+
+def test_oversize_continue_reads_the_file_only_once(
+    qtbot: QtBot, window: MainWindow, make_xlsx: MakeXlsx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import rebar_optimizer.ui.worker as worker_module
+
+    answer_oversize(window, monkeypatch, go_on=True)
+    reads: list[object] = []
+    real_read = worker_module.read_pieces
+
+    def counting_read(path: object) -> object:
+        reads.append(path)
+        return real_read(path)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(worker_module, "read_pieces", counting_read)
+    window.choose_input(make_xlsx([["DB12", 1, 13.0, 2], ["DB12", 2, 3.0, 1]]))
+    window.stock_edit.setText("12")
+    compute(qtbot, window)
+    assert len(reads) == 1
+    assert window._outcome is not None
+    assert [u.no for u in window._outcome.plan.unplaced] == ["1"]
+    assert "คำนวณต่อ" in window.log_view.toPlainText()
+
+
+def test_oversize_dialog_defaults_to_stop(
+    qtbot: QtBot, window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real dialog: Esc / Enter must not start a plan with unplaced pieces."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from rebar_optimizer.domain.models import Piece
+
+    seen: list[str] = []
+
+    def press_enter() -> None:
+        box = QApplication.activeModalWidget()
+        assert isinstance(box, QMessageBox)
+        seen.append(box.text())
+        seen.append(box.informativeText())
+        box.defaultButton().click()
+
+    QTimer.singleShot(200, press_enter)
+    pieces = [Piece("DB12", str(i), 13000 + i, 1, (i + 2,)) for i in range(12)]
+    assert window._confirm_oversize(pieces, 12000) is False
+    assert "12 รายการ (12 ชิ้น)" in seen[0] and "12.000 ม." in seen[0]
+    assert "อย่างน้อย 13.011 ม." in seen[1]
+    assert "… และอีก 2 รายการ" in seen[1]

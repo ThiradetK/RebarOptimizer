@@ -17,12 +17,20 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
-from rebar_optimizer.domain.errors import Cancelled, InputValidationError, SettingsError
+from rebar_optimizer.domain.errors import (
+    Cancelled,
+    InputValidationError,
+    OutputWriteError,
+    SettingsError,
+)
 from rebar_optimizer.domain.models import CuttingPlan
 from rebar_optimizer.domain.settings import OptimizerSettings
 from rebar_optimizer.io.reader import ReadResult, read_pieces
+from rebar_optimizer.io.writer import WriteSource, write_plan
 from rebar_optimizer.services import planner
 from rebar_optimizer.services.cancel import CancelToken, ProgressEvent
+from rebar_optimizer.services.summary import plan_totals
+from rebar_optimizer.ui.widgets.plan_preview import PreviewData, prepare_preview
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +39,8 @@ logger = logging.getLogger(__name__)
 class PlanOutcome:
     plan: CuttingPlan
     source: ReadResult
+    previews: tuple[PreviewData, ...] = ()
+    """One per size, prepared on the worker thread (empty: prepare on demand)."""
 
 
 class PlanWorker(QObject):
@@ -45,10 +55,14 @@ class PlanWorker(QObject):
     """Short English description; details are in the log."""
     finished = Signal()
 
-    def __init__(self, input_path: Path, settings: OptimizerSettings) -> None:
+    def __init__(
+        self, input_path: Path, settings: OptimizerSettings, source: ReadResult | None = None
+    ) -> None:
+        """``source``: the already-read input (skips reading ``input_path`` again)."""
         super().__init__()
         self._input_path = input_path
         self._settings = settings
+        self._source = source
         self._token = CancelToken()
 
     def cancel(self) -> None:
@@ -59,7 +73,7 @@ class PlanWorker(QObject):
     def run(self) -> None:
         try:
             self._token.raise_if_cancelled()
-            source = read_pieces(self._input_path)
+            source = self._source if self._source is not None else read_pieces(self._input_path)
             plan = planner.plan(
                 source.pieces,
                 self._settings,
@@ -67,7 +81,11 @@ class PlanWorker(QObject):
                 cancel=self._token,
                 inventory=source.inventory,
             )
-            self.succeeded.emit(PlanOutcome(plan=plan, source=source))
+            # Heavy result preparation happens here, not on the GUI thread: with
+            # ~90,000 bar patterns it took several seconds and froze the window.
+            previews = tuple(prepare_preview(size_plan) for size_plan in plan.sizes)
+            plan_totals(plan)  # fills the per-size summary cache used by the window
+            self.succeeded.emit(PlanOutcome(plan=plan, source=source, previews=previews))
         except (InputValidationError, SettingsError) as exc:
             self.input_invalid.emit(exc)
         except Cancelled:
@@ -83,7 +101,81 @@ class PlanWorker(QObject):
         self.progress.emit(event)
 
 
-def start_worker(worker: PlanWorker) -> QThread:
+class ReadWorker(QObject):
+    """Reads and validates the input off the GUI thread (100,000 rows take seconds),
+    so the window can check it before planning starts.
+
+    Signal order: exactly one of ``read`` / ``input_invalid`` / ``cancelled`` /
+    ``crashed``, then ``finished``.
+    """
+
+    read = Signal(object)
+    """``ReadResult``."""
+    input_invalid = Signal(object)
+    cancelled = Signal()
+    crashed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, input_path: Path) -> None:
+        super().__init__()
+        self._input_path = input_path
+        self._token = CancelToken()
+
+    def cancel(self) -> None:
+        self._token.cancel()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self._token.raise_if_cancelled()
+            source = read_pieces(self._input_path)
+            self._token.raise_if_cancelled()
+            self.read.emit(source)
+        except InputValidationError as exc:
+            self.input_invalid.emit(exc)
+        except Cancelled:
+            self.cancelled.emit()
+        except Exception as exc:
+            logger.exception("reading failed")
+            self.crashed.emit(f"{type(exc).__name__}: {exc}")
+        finally:
+            self.finished.emit()
+
+
+class SaveWorker(QObject):
+    """Writes the Excel file off the GUI thread: a 100,000-row result takes
+    minutes in openpyxl and would otherwise freeze the window.
+
+    Signal order: exactly one of ``saved`` / ``failed`` / ``crashed``, then ``finished``.
+    """
+
+    saved = Signal(object)
+    """``Path`` written."""
+    failed = Signal(object)
+    """``OutputWriteError`` (e.g. the file is open in Excel)."""
+    crashed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, path: Path, plan: CuttingPlan, source: WriteSource) -> None:
+        super().__init__()
+        self._path = path
+        self._plan = plan
+        self._source = source
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.saved.emit(write_plan(self._path, self._plan, self._source))
+        except OutputWriteError as exc:
+            self.failed.emit(exc)
+        except Exception as exc:
+            logger.exception("saving failed")
+            self.crashed.emit(f"{type(exc).__name__}: {exc}")
+        finally:
+            self.finished.emit()
+
+
+def start_worker(worker: PlanWorker | ReadWorker | SaveWorker) -> QThread:
     """Move ``worker`` to a new thread and start it; the thread quits when the
     worker reports ``finished``.
 

@@ -18,6 +18,14 @@ SEVERITY_LABELS: dict[Severity, str] = {
     Severity.WARNING: "คำเตือน",
 }
 
+STAGE_LABELS: dict[str, str] = {
+    "greedy": "จัดแผนเบื้องต้น",
+    "improve": "ปรับแผนให้ใช้เศษ",
+    "search": "ค้นหาแผนที่ดีที่สุด",
+    "finish": "สรุปผล",
+}
+"""Steps inside one size (``services.cancel.Stage``), shown while computing."""
+
 STATUS_LABELS: dict[str, str] = {
     "OPTIMAL": "OPTIMAL (ดีที่สุดแล้ว)",
     "FEASIBLE": "FEASIBLE (ดี แต่หมดเวลาก่อนพิสูจน์ว่าดีที่สุด)",
@@ -103,8 +111,9 @@ MESSAGES: dict[IssueCode, str] = {
     ),
     IssueCode.UNPLACED_TOO_LONG: "ยาวกว่าเหล็กเส้นที่ยาวที่สุด ({longest_stock_m} ม.)",
     IssueCode.PATTERN_LIMIT_EXCEEDED: (
-        "Size {size}: รูปแบบการตัดมีมากกว่า {max_patterns} แบบ จึงใช้ column generation "
-        "(สถานะ HEURISTIC) ซึ่งใกล้เคียงดีที่สุด ดูความห่างจากค่าที่ดีที่สุดได้ที่ gap %"
+        "Size {size}: รูปแบบการตัดมีมากเกินจะไล่ครบ (เกิน {max_patterns} แบบหรือเกินเวลาที่แบ่งไว้) "
+        "จึงคำนวณด้วย column generation "
+        "ผลที่ได้ดีที่สุดหรือใกล้เคียงที่สุด ดูสถานะและ gap % ของ Size นี้ในตารางสรุป"
     ),
     IssueCode.TIME_LIMIT_HIT: (
         "Size {size}: คำนวณครบเวลา {seconds} วินาทีก่อนพิสูจน์ได้ว่าดีที่สุด "
@@ -122,6 +131,11 @@ MESSAGES: dict[IssueCode, str] = {
 def format_metres(length_mm: int) -> str:
     """``3500`` -> ``"3.500"``."""
     return f"{length_mm / 1000:.3f}"
+
+
+def format_metres_short(length_mm: int) -> str:
+    """``10000`` -> ``"10"``, ``7300`` -> ``"7.3"``, ``3505`` -> ``"3.505"``."""
+    return f"{length_mm / 1000:.3f}".rstrip("0").rstrip(".")
 
 
 def _format_value(value: object) -> str:
@@ -183,6 +197,7 @@ SHEET_NAMES: dict[str, str] = {
     "plan": "แผนการตัด",
     "details": "รายละเอียดการตัด",
     "summary": "สรุปต่อ Size",
+    "bar_counts": "สรุปจำนวนเส้น",
     "purchase": "รายการสั่งซื้อ",
     "inventory": "ใช้จากคงคลัง",
     "remnants": "เศษคงเหลือ",
@@ -191,6 +206,8 @@ SHEET_NAMES: dict[str, str] = {
     "status": "ตั้งค่าและสถานะ",
     "input": "ข้อมูล Input",
 }
+
+BAR_COUNT_TITLE_SHEET = "สรุปจำนวนเส้นแยกตาม Size และความยาว"
 
 HEADERS: dict[str, tuple[str, ...]] = {
     "plan": (
@@ -237,6 +254,7 @@ HEADERS: dict[str, tuple[str, ...]] = {
         "lower bound (m)",
         "gap %",
     ),
+    "bar_counts": (BAR_COUNT_TITLE_SHEET,),
     "purchase": ("Size", "ความยาว stock (m)", "จำนวนเส้น", "ความยาวรวม (m)", "น้ำหนัก (kg)"),
     "inventory": (
         "Size",
@@ -277,6 +295,10 @@ REPRODUCIBILITY_NOTE = (
 
 SUBTOTAL_TEXT = "รวม {size}"
 
+BAR_COUNT_LINE = "Size {size} จำนวน {count} เส้น เหล็ก {stock_m} เมตร"
+"""One line of the per-size, per-length bar summary (CLI and GUI)."""
+BAR_COUNT_TITLE = BAR_COUNT_TITLE_SHEET
+
 STOCK_SOURCE_LABELS: dict[str, str] = {
     "new": "ซื้อใหม่",
     "inventory": "คงคลัง",
@@ -298,6 +320,7 @@ CLI_TEXT: dict[str, str] = {
     "need_input": "กรุณาระบุไฟล์ input และ --stock",
     "template_written": "สร้างไฟล์ตัวอย่างแล้ว: {path}",
     "progress": "[{index}/{total}] กำลังคำนวณ Size {size} ...",
+    "progress_stage": "      {stage}{step} ...",
     "size_header": "Size {size} — สถานะ {status}",
     "single_stock": "  ความยาวเหล็กเส้นที่เลือก: {stock_m} ม.",
     "stock_count": "  สั่งซื้อ: {items}",
@@ -323,6 +346,14 @@ CLI_TEXT: dict[str, str] = {
     "selftest_ok": "selftest ผ่าน",
     "selftest_failed": "selftest ไม่ผ่าน รายละเอียดอยู่ในไฟล์ log: {log_path}",
 }
+
+
+def format_bar_count(size: str, count: int, stock_length_mm: int, inventory: bool) -> str:
+    """``Size DB12 จำนวน 5 เส้น เหล็ก 10 เมตร`` (+ ``(คงคลัง)`` for inventory bars)."""
+    line = BAR_COUNT_LINE.format(
+        size=size, count=count, stock_m=format_metres_short(stock_length_mm)
+    )
+    return line + INVENTORY_TAG if inventory else line
 
 
 def format_cuts(cuts: Iterable[tuple[str, int, int]]) -> str:
@@ -364,7 +395,29 @@ GUI_TEXT: dict[str, str] = {
     "status_ready": "พร้อมคำนวณ",
     "status_reading": "กำลังอ่านไฟล์…",
     "status_size": "Size {index}/{total}: {size}",
+    "status_stage": "Size {index}/{total}: {size} — {stage}{step}",
+    "stage_step": " (ความยาว stock {step}/{steps})",
+    "elapsed": " · {seconds} วินาที",
+    "log_stage": "Size {size}: {stage}{step}",
     "status_done": "คำนวณเสร็จแล้ว",
+    "status_saving": "กำลังบันทึกไฟล์ Excel…",
+    "status_stopped_oversize": "หยุดก่อนคำนวณ — แก้ความยาว stock แล้วกดคำนวณอีกครั้ง",
+    "oversize_title": "มีชิ้นงานยาวกว่าเหล็กเส้น",
+    "oversize_text": ("พบชิ้นงาน {rows} รายการ ({pieces} ชิ้น) ที่ยาวกว่าเหล็กเส้นที่ยาวที่สุด {longest_m} ม."),
+    "oversize_info": (
+        'ถ้าคำนวณต่อ ชิ้นเหล่านี้จะไม่ถูกตัด และไปอยู่ในชีต "วางไม่ได้"\n'
+        "ถ้าหยุด ให้เพิ่มความยาว stock (ต้องยาวอย่างน้อย {needed_m} ม.) แล้วกดคำนวณใหม่\n\n"
+        "{items}"
+    ),
+    "oversize_item": "Size {size} No {no} ยาว {length_m} ม. × {quantity}",
+    "oversize_more": "… และอีก {count} รายการ",
+    "oversize_continue": "คำนวณต่อ",
+    "oversize_stop": "หยุด แล้วแก้ความยาว stock",
+    "log_oversize": "พบชิ้นงานยาวกว่า stock {rows} รายการ ({pieces} ชิ้น)",
+    "log_oversize_stop": "หยุดก่อนคำนวณตามที่เลือก",
+    "log_oversize_continue": "คำนวณต่อ ชิ้นที่ยาวเกินจะอยู่ในรายการวางไม่ได้",
+    "status_saved": "บันทึกไฟล์แล้ว",
+    "status_save_failed": "บันทึกไฟล์ไม่สำเร็จ",
     "status_cancelling": "กำลังยกเลิก…",
     "status_cancelled": "ยกเลิกการคำนวณแล้ว",
     "status_failed": "คำนวณไม่สำเร็จ",
@@ -373,6 +426,9 @@ GUI_TEXT: dict[str, str] = {
     "log_size_finished": "เสร็จ Size {size}",
     # results
     "results_empty": "ยังไม่มีผลลัพธ์ — กรอกข้อมูลทางซ้ายแล้วกด คำนวณ",
+    "result_source": (
+        "ผลลัพธ์ของ {name} · stock {stocks} ม. · {mode} · ใบตัด {kerf} มม. · คำนวณเมื่อ {time} น."
+    ),
     "total_stock": "เหล็กรวม",
     "total_weight": "น้ำหนักที่ซื้อ",
     "total_reusable": "เศษใช้ต่อได้",
@@ -408,6 +464,7 @@ GUI_TEXT: dict[str, str] = {
         "เกิดข้อผิดพลาดที่ไม่คาดคิด ข้อมูลที่กรอกไว้ยังอยู่ครบ\nรายละเอียดถูกบันทึกไว้ที่ไฟล์ log:\n{log_path}"
     ),
     "copy": "คัดลอก",
+    "copied": "คัดลอกแล้ว",
     "close": "ปิด",
     # cutting plan preview
     "preview_title": "ภาพแผนการตัด",
@@ -431,3 +488,13 @@ GUI_SIZE_TABLE_HEADERS: tuple[str, ...] = (
     "สถานะ",
     "gap",
 )
+
+
+def stage_step_text(step: int, steps: int) -> str:
+    """`` (ความยาว stock 1/2)`` while single-length mode tries several lengths, else ``""``.
+
+    ``step`` is 0-based.
+    """
+    if steps <= 1:
+        return ""
+    return GUI_TEXT["stage_step"].format(step=step + 1, steps=steps)

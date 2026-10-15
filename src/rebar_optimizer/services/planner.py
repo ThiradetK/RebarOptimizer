@@ -13,7 +13,7 @@ import math
 import re
 import time
 from collections import Counter, deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from rebar_optimizer.domain.errors import Issue, IssueCode
@@ -36,6 +36,8 @@ from rebar_optimizer.services.cancel import (
     ProgressCallback,
     ProgressEvent,
     ProgressKind,
+    Stage,
+    StageCallback,
     check_cancelled,
 )
 from rebar_optimizer.services.invariants import verify_plan
@@ -59,6 +61,13 @@ logger = logging.getLogger(__name__)
 
 _DIGITS = re.compile(r"(\d+)")
 MIN_ILP_TIME_S = 0.5
+# Shares of a size's time limit (the limit covers the whole size, not only CP-SAT):
+GREEDY_IMPROVE_SHARE = 0.25
+"""Remnant reuse on the greedy plan stops at this point."""
+ENUMERATION_SHARE = 0.10
+"""Pattern enumeration gives up (-> column generation) after this long."""
+FINISH_RESERVE_SHARE = 0.05
+"""Kept back from the ILP for post-processing its result and finishing."""
 """CP-SAT always gets at least this long, even if greedy used up the budget."""
 
 
@@ -98,6 +107,7 @@ def plan(
                 cancel,
                 issues,
                 inventory=inventory_by_size.get(size, NO_INVENTORY),
+                on_stage=_stage_reporter(on_progress, size, index, len(sizes)),
             )
         )
         if on_progress is not None:
@@ -112,9 +122,60 @@ def plan(
                 nos=[u.no for u in unplaced],
             )
         )
-    result = CuttingPlan(sizes=tuple(size_plans), settings=settings, issues=tuple(issues))
+    result = CuttingPlan(
+        sizes=tuple(size_plans), settings=settings, issues=tuple(merge_size_issues(issues))
+    )
     verify_plan(pieces, result, settings, inventory)
     return result
+
+
+def oversized_pieces(pieces: Sequence[Piece], stock_lengths_mm: Sequence[int]) -> list[Piece]:
+    """Pieces longer than the longest (new) stock length, in input order.
+
+    ``plan`` reports these as unplaced (D4); the GUI asks before planning
+    whether to continue or to change the stock lengths first.
+    """
+    longest = max(stock_lengths_mm)
+    return [p for p in pieces if p.length_mm > longest]
+
+
+def _stage_reporter(
+    on_progress: ProgressCallback | None, size: str, index: int, total: int
+) -> StageCallback | None:
+    if on_progress is None:
+        return None
+
+    def report(stage: Stage, step: int, steps: int) -> None:
+        on_progress(ProgressEvent(ProgressKind.STAGE, size, index, total, stage, step, steps))
+
+    return report
+
+
+def merge_size_issues(issues: Sequence[Issue]) -> list[Issue]:
+    """One issue per code instead of one per size when only the size differs,
+    e.g. ``Size DB12, DB16: ...`` (first occurrence keeps its place)."""
+    merged: dict[tuple[object, ...], tuple[Issue, list[object]]] = {}
+    result: list[Issue | tuple[object, ...]] = []
+    for issue in issues:
+        if "size" not in issue.params:
+            result.append(issue)
+            continue
+        rest = tuple(sorted((k, repr(v)) for k, v in issue.params.items() if k != "size"))
+        key = (issue.code, issue.severity, rest)
+        if key not in merged:
+            merged[key] = (issue, [])
+            result.append(key)
+        merged[key][1].append(issue.params["size"])
+    out: list[Issue] = []
+    for item in result:
+        if isinstance(item, Issue):
+            out.append(item)
+            continue
+        first, sizes = merged[item]
+        params = dict(first.params)
+        params["size"] = sizes if len(sizes) > 1 else sizes[0]
+        out.append(Issue(first.code, first.severity, params))
+    return out
 
 
 def inventory_per_size(inventory: Sequence[InventoryStock]) -> dict[str, dict[int, int]]:
@@ -141,8 +202,10 @@ def plan_size(
     issues: list[Issue] | None = None,
     *,
     inventory: Inventory = NO_INVENTORY,
+    on_stage: StageCallback | None = None,
 ) -> SizePlan:
-    """Plan one size. Warnings (pattern limit, time limit) go to ``issues``.
+    """Plan one size. Warnings (pattern limit, time limit) go to ``issues``;
+    ``on_stage`` hears about each step so long sizes still show progress.
 
     Inventory is usable in both modes; single-length mode restricts only the
     purchased stock (phase 8). Pieces longer than the longest *new* stock are
@@ -187,8 +250,13 @@ def plan_size(
     # Single-length mode shares the size's time limit equally between lengths (5.1.3).
     time_limit = settings.time_limit_s / len(candidate_sets)
     solved_sets = []
-    for stock_set in candidate_sets:
+    for step, stock_set in enumerate(candidate_sets):
         check_cancelled(cancel)
+
+        def report(stage: Stage, step: int = step) -> None:
+            if on_stage is not None:
+                on_stage(stage, step, len(candidate_sets))
+
         solved_sets.append(
             (
                 _solve_lengths(
@@ -200,6 +268,7 @@ def plan_size(
                     cancel=cancel,
                     issues=issues,
                     inventory=inventory,
+                    report=report,
                 ),
                 stock_set,
             )
@@ -220,6 +289,8 @@ def plan_size(
         best.status,
     )
 
+    if on_stage is not None:
+        on_stage(Stage.FINISH, 0, 1)
     groups = assign_numbers(size, best.bars, placeable)
     buys_new = any(not bar.is_inventory for bar in best.bars)
     return SizePlan(
@@ -247,6 +318,7 @@ def _solve_lengths(
     cancel: CancelToken | None,
     issues: list[Issue],
     inventory: Inventory = NO_INVENTORY,
+    report: Callable[[Stage], None] = lambda _: None,
 ) -> _Solved:
     """Greedy first, then the ILP; keep the lower ``stock_cost`` (D8).
 
@@ -255,14 +327,26 @@ def _solve_lengths(
     """
     started = time.monotonic()
     kerf_mm = settings.kerf_mm
+    report(Stage.GREEDY)
     greedy = GreedySolver().solve(demand, stock_set, kerf_mm, cancel, inventory=inventory)
-    greedy_bars = postprocess(greedy.bars, demand, stock_set, kerf_mm, cancel, inventory=inventory)
+    report(Stage.IMPROVE)
+    deadline = started + time_limit_s
+    greedy_bars = postprocess(
+        greedy.bars,
+        demand,
+        stock_set,
+        kerf_mm,
+        cancel,
+        inventory=inventory,
+        deadline=started + time_limit_s * GREEDY_IMPROVE_SHARE,
+    )
     greedy_cost = stock_cost(greedy_bars)
     bound = simple_lower_bound(demand, stock_set, kerf_mm, inventory)
     if _meets_bound(greedy_cost, bound):
         logger.info("size %s: greedy meets the lower bound, ILP skipped", size)
         return _Solved(bars=greedy_bars, status=SolveStatus.GREEDY, lower_bound_mm=bound)
 
+    report(Stage.SEARCH)
     pattern_set = enumerate_patterns(
         demand,
         stock_set,
@@ -271,9 +355,13 @@ def _solve_lengths(
         extra_bars=greedy_bars,
         cancel=cancel,
         inventory=inventory,
+        deadline=min(deadline, time.monotonic() + time_limit_s * ENUMERATION_SHARE),
     )
     options = IlpOptions(
-        time_limit_s=max(MIN_ILP_TIME_S, time_limit_s - (time.monotonic() - started)),
+        # Leave a little for post-processing the ILP result and finishing the size.
+        time_limit_s=max(
+            MIN_ILP_TIME_S, deadline - time.monotonic() - time_limit_s * FINISH_RESERVE_SHARE
+        ),
         random_seed=settings.random_seed,
         num_workers=settings.num_workers,
     )
@@ -303,7 +391,9 @@ def _solve_lengths(
 
     if result.lower_bound_mm is not None:
         bound = max(bound, result.lower_bound_mm)
-    ilp_bars = postprocess(result.bars, demand, stock_set, kerf_mm, cancel, inventory=inventory)
+    ilp_bars = postprocess(
+        result.bars, demand, stock_set, kerf_mm, cancel, inventory=inventory, deadline=deadline
+    )
     ilp_cost = stock_cost(ilp_bars)
     status = result.status
     if _meets_bound(ilp_cost, bound):

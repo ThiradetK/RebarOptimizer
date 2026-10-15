@@ -47,6 +47,10 @@ def test_signals_in_order(qtbot: QtBot, tmp_path: Path) -> None:
     outcomes: list[PlanOutcome] = []
     worker.succeeded.connect(outcomes.append)
     events = run_worker(qtbot, worker)
+    # Stage events (in-size progress) are checked in test_planner; here the order
+    # of the size events and the final signals matters.
+    assert any(e.startswith("progress:stage:") for e in events)
+    events = [e for e in events if not e.startswith("progress:stage:")]
     assert events == [
         "progress:size_started:DB12",
         "progress:size_finished:DB12",

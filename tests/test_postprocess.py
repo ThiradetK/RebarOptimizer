@@ -133,3 +133,22 @@ def test_postprocess_never_adds_length_and_keeps_demand(
     assert cut_counts(result) == Counter(demand)
     assert all(b.stock_length_mm in stock_set for b in result)
     assert all(kerf.fits(b.lengths, b.stock_length_mm, k) for b in result)
+
+
+def test_reuse_remnants_scales_to_large_sizes() -> None:
+    """A 100,000-row input stalled for hours in this step (old loop was ~B² per move)."""
+    import random
+    import time
+
+    rng = random.Random(1)
+    demand = Counter(rng.randrange(300, 11900, 10) for _ in range(20_000))
+    stocks = (10000, 12000)
+    start = downsize_all(GreedySolver().solve(demand, stocks, 0).bars, stocks, 0)
+    began = time.perf_counter()
+    result = reuse_remnants(start, stocks, 0)
+    elapsed = time.perf_counter() - began
+    assert elapsed < 5, f"step 3 took {elapsed:.1f}s for {len(start)} bars"
+    assert cut_counts(result) == cut_counts(start)
+    assert total_stock_mm(result) <= total_stock_mm(start)
+    # A fixpoint (D5): running the step again finds no further improving move.
+    assert total_stock_mm(reuse_remnants(result, stocks, 0)) == total_stock_mm(result)

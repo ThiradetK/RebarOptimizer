@@ -32,7 +32,7 @@ from rebar_optimizer.io.writer import WriteSource, write_plan
 from rebar_optimizer.logging_config import setup_logging
 from rebar_optimizer.services import planner
 from rebar_optimizer.services.cancel import ProgressEvent, ProgressKind
-from rebar_optimizer.services.summary import bar_detail, cut_runs, summarize_size
+from rebar_optimizer.services.summary import bar_counts, cut_runs, group_details, summarize_size
 
 EXIT_OK = 0
 EXIT_INPUT = 1
@@ -176,8 +176,8 @@ def format_plan(plan: CuttingPlan) -> list[str]:
                     bound_m=format_metres(size_plan.lower_bound_mm), gap=size_plan.gap * 100
                 )
             )
-        for index, group in enumerate(size_plan.groups, start=1):
-            detail = bar_detail(group, size_plan.kerf_mm, size_plan.piece_lengths_mm)
+        details = group_details(size_plan)
+        for index, (group, detail) in enumerate(zip(size_plan.groups, details, strict=True), 1):
             tag = (
                 CLI_TEXT["reusable_tag"].format(longest_m=format_metres(detail.longest_cuttable_mm))
                 if detail.longest_cuttable_mm is not None
@@ -205,6 +205,14 @@ def format_plan(plan: CuttingPlan) -> list[str]:
                 inventory_m=format_metres(total_inventory),
             )
         )
+    counts = bar_counts(plan)
+    if counts:
+        lines.append("")
+        lines.append(th.BAR_COUNT_TITLE + ":")
+        lines += [
+            "  " + th.format_bar_count(c.size, c.count, c.stock_length_mm, c.inventory)
+            for c in counts
+        ]
     if plan.unplaced:
         lines.append("")
         lines.append(CLI_TEXT["unplaced_header"])
@@ -228,6 +236,13 @@ def _print_progress(event: ProgressEvent) -> None:
     if event.kind is ProgressKind.SIZE_STARTED:
         print(
             CLI_TEXT["progress"].format(index=event.index + 1, total=event.total, size=event.size),
+            file=sys.stderr,
+        )
+    elif event.kind is ProgressKind.STAGE and event.stage is not None:
+        print(
+            CLI_TEXT["progress_stage"].format(
+                stage=th.STAGE_LABELS[event.stage], step=th.stage_step_text(event.step, event.steps)
+            ),
             file=sys.stderr,
         )
 

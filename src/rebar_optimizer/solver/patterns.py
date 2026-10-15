@@ -13,6 +13,8 @@ favour of a shorter stock: inventory is limited, so the shorter bar may run out.
 
 from __future__ import annotations
 
+import time
+from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 
@@ -51,9 +53,12 @@ def iter_maximal_patterns(
     kerf_mm: int,
     cancel: CancelToken | None = None,
     inventory: Inventory = NO_INVENTORY,
+    *,
+    deadline: float | None = None,
 ) -> Iterator[Pattern]:
     """Yield every maximal, non-dominated pattern (lazily): new stock first,
-    then each inventory length."""
+    then each inventory length. Stops with ``_OutOfTime`` after ``deadline``
+    (``time.monotonic()``)."""
     stocks = sorted(stock_lengths_mm)
     jobs: list[tuple[int, StockSource, int]] = []  # (stock, source, shorter capacity)
     for stock_index, stock in enumerate(stocks):
@@ -61,7 +66,11 @@ def iter_maximal_patterns(
         shorter = kerf.capacity(stocks[stock_index - 1], kerf_mm) if stock_index else -1
         jobs.append((stock, StockSource.NEW, shorter))
     jobs.extend((length, StockSource.INVENTORY, -1) for length in sorted(inventory))
-    yield from _iter_patterns(demand, jobs, kerf_mm, cancel)
+    yield from _iter_patterns(demand, jobs, kerf_mm, cancel, deadline)
+
+
+class _OutOfTime(Exception):
+    """Enumeration passed its deadline (treated like exceeding ``max_patterns``)."""
 
 
 def _iter_patterns(
@@ -69,6 +78,7 @@ def _iter_patterns(
     jobs: Sequence[tuple[int, StockSource, int]],
     kerf_mm: int,
     cancel: CancelToken | None,
+    deadline: float | None = None,
 ) -> Iterator[Pattern]:
     lengths = tuple(sorted(demand, reverse=True))
     caps = tuple(demand[length] for length in lengths)
@@ -95,6 +105,8 @@ def _iter_patterns(
             visited += 1
             if visited % _CANCEL_CHECK_EVERY == 0:
                 check_cancelled(cancel)
+                if deadline is not None and time.monotonic() > deadline:
+                    raise _OutOfTime
             if remaining - suffix_fill[depth] >= unsaturated:
                 continue  # even taking every later piece leaves room for a skipped one
             if depth == n:
@@ -133,22 +145,47 @@ def enumerate_patterns(
     extra_bars: Iterable[RawBar] = (),
     cancel: CancelToken | None = None,
     inventory: Inventory = NO_INVENTORY,
+    deadline: float | None = None,
 ) -> PatternSet | None:
     """All maximal patterns plus the patterns of ``extra_bars`` (e.g. the greedy
-    plan, so the ILP can start from it). ``None`` if more than ``max_patterns``."""
+    plan, so the ILP can start from it). ``None`` if more than ``max_patterns``
+    or, when ``deadline`` (``time.monotonic()``) passes first: the caller then
+    uses column generation, which needs no complete pattern list."""
     lengths = tuple(sorted(demand, reverse=True))
     found: dict[Pattern, None] = {}
-    for pattern in iter_maximal_patterns(demand, stock_lengths_mm, kerf_mm, cancel, inventory):
-        found[pattern] = None
-        if len(found) > max_patterns:
-            return None
-    for bar in extra_bars:
-        found.setdefault(pattern_of(bar, lengths), None)
+    try:
+        for pattern in iter_maximal_patterns(
+            demand, stock_lengths_mm, kerf_mm, cancel, inventory, deadline=deadline
+        ):
+            found[pattern] = None
+            if len(found) > max_patterns:
+                return None
+    except _OutOfTime:
+        return None
+    for pattern in pattern_counts(extra_bars, lengths):
+        found.setdefault(pattern, None)
     return PatternSet(lengths=lengths, patterns=tuple(found))
 
 
-def pattern_of(bar: RawBar, lengths: Sequence[int]) -> Pattern:
+def pattern_counts(bars: Iterable[RawBar], lengths: Sequence[int]) -> Counter[Pattern]:
+    """How many of ``bars`` use each pattern, in first-seen order.
+
+    Identical bars are converted once: a pattern is a vector over all lengths,
+    and a large size (1,000+ lengths, 50,000+ bars) made per-bar conversion
+    take seconds.
+    """
     index = {length: i for i, length in enumerate(lengths)}
+    patterns: Counter[Pattern] = Counter()
+    for bar, count in Counter(bars).items():
+        patterns[_pattern_of(bar, lengths, index)] += count
+    return patterns
+
+
+def pattern_of(bar: RawBar, lengths: Sequence[int]) -> Pattern:
+    return _pattern_of(bar, lengths, {length: i for i, length in enumerate(lengths)})
+
+
+def _pattern_of(bar: RawBar, lengths: Sequence[int], index: dict[int, int]) -> Pattern:
     counts = [0] * len(lengths)
     for length in bar.lengths:
         counts[index[length]] += 1
