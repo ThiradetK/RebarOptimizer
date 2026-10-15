@@ -23,6 +23,8 @@ from rebar_optimizer.domain.settings import OptimizerSettings
 from rebar_optimizer.io.reader import ReadResult, read_pieces
 from rebar_optimizer.services import planner
 from rebar_optimizer.services.cancel import CancelToken, ProgressEvent
+from rebar_optimizer.services.summary import plan_totals
+from rebar_optimizer.ui.widgets.plan_preview import PreviewData, prepare_preview
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,8 @@ logger = logging.getLogger(__name__)
 class PlanOutcome:
     plan: CuttingPlan
     source: ReadResult
+    previews: tuple[PreviewData, ...] = ()
+    """One per size, prepared on the worker thread (empty: prepare on demand)."""
 
 
 class PlanWorker(QObject):
@@ -67,7 +71,11 @@ class PlanWorker(QObject):
                 cancel=self._token,
                 inventory=source.inventory,
             )
-            self.succeeded.emit(PlanOutcome(plan=plan, source=source))
+            # Heavy result preparation happens here, not on the GUI thread: with
+            # ~90,000 bar patterns it took several seconds and froze the window.
+            previews = tuple(prepare_preview(size_plan) for size_plan in plan.sizes)
+            plan_totals(plan)  # fills the per-size summary cache used by the window
+            self.succeeded.emit(PlanOutcome(plan=plan, source=source, previews=previews))
         except (InputValidationError, SettingsError) as exc:
             self.input_invalid.emit(exc)
         except Cancelled:

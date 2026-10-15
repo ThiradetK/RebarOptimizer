@@ -202,6 +202,9 @@ def test_cancel(qtbot: QtBot, window: MainWindow, tmp_path: Path) -> None:
     window.cancel_button.click()
     qtbot.waitUntil(lambda: not window.is_running(), timeout=5_000)
     assert window.status_label.text() == GUI_TEXT["status_cancelled"]
+    window._tick_status()  # a late tick must not overwrite the final status
+    qtbot.wait(1200)
+    assert window.status_label.text() == GUI_TEXT["status_cancelled"]
     assert not window.save_button.isEnabled()
     assert window.stock_edit.isEnabled()
 

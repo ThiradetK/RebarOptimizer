@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QToolTip, QWidget
 from rebar_optimizer.domain.models import SizePlan, StockSource
 from rebar_optimizer.i18n.th import GUI_TEXT, format_metres
 from rebar_optimizer.services.planner import natural_key
-from rebar_optimizer.services.summary import bar_detail
+from rebar_optimizer.services.summary import group_details
 from rebar_optimizer.ui import animations
 from rebar_optimizer.ui.theme import LIGHT, Theme
 
@@ -66,8 +66,7 @@ def build_rows(plan: SizePlan) -> list[Row]:
     """Lay out each bar: piece, kerf, piece, ..., [last kerf], remnant (D3)."""
     rows: list[Row] = []
     k = plan.kerf_mm
-    for group in plan.groups:
-        detail = bar_detail(group, k, plan.piece_lengths_mm)
+    for group, detail in zip(plan.groups, group_details(plan), strict=True):
         usage = detail.usage
         per_no: dict[str, int] = {}
         for cut in group.bar.cuts:
@@ -144,12 +143,37 @@ PALETTE_DARK = (
 )
 
 
+def no_color_slots(nos: Iterable[str]) -> dict[str, int]:
+    """Palette slot per No, in natural No order (theme independent, no Qt needed)."""
+    ordered = sorted(set(nos), key=natural_key)
+    return {no: i % len(PALETTE_LIGHT) for i, no in enumerate(ordered)}
+
+
 def no_colors(nos: Iterable[str], theme: Theme = LIGHT) -> dict[str, QColor]:
     """Colour per No: palette slots in natural No order, so the same input always
     gets the same colours and neighbouring numbers never share one (up to 12)."""
-    palette = PALETTE_DARK if theme.dark else PALETTE_LIGHT
-    ordered = sorted(set(nos), key=natural_key)
-    return {no: QColor(palette[i % len(palette)]) for i, no in enumerate(ordered)}
+    return _slots_to_colors(no_color_slots(nos), theme)
+
+
+def _slots_to_colors(slots: dict[str, int], theme: Theme) -> dict[str, QColor]:
+    palette = [QColor(c) for c in (PALETTE_DARK if theme.dark else PALETTE_LIGHT)]
+    return {no: palette[slot] for no, slot in slots.items()}
+
+
+@dataclass(frozen=True)
+class PreviewData:
+    """Everything a preview needs that can be computed off the GUI thread."""
+
+    rows: tuple[Row, ...]
+    color_slots: dict[str, int]
+
+
+def prepare_preview(plan: SizePlan | None) -> PreviewData:
+    """Lay out a size plan for ``PlanPreview`` (no widgets involved: safe in a worker
+    thread, which keeps a 90,000-pattern result from freezing the window)."""
+    rows = tuple(build_rows(plan)) if plan is not None else ()
+    slots = no_color_slots(seg.no for row in rows for seg in row.segments if seg.no)
+    return PreviewData(rows=rows, color_slots=slots)
 
 
 class PlanPreview(QWidget):
@@ -166,17 +190,24 @@ class PlanPreview(QWidget):
 
     # --- data ------------------------------------------------------------------------
 
-    def set_plan(self, plan: SizePlan | None, max_stock_mm: int | None = None) -> None:
-        self._rows = build_rows(plan) if plan is not None else []
-        self._colors = no_colors(
-            (seg.no for row in self._rows for seg in row.segments if seg.no), self._theme
-        )
+    def set_plan(
+        self,
+        plan: SizePlan | None,
+        max_stock_mm: int | None = None,
+        *,
+        prepared: PreviewData | None = None,
+    ) -> None:
+        """Show ``plan``; pass ``prepared`` (from ``prepare_preview``) to skip the layout work."""
+        data = prepared if prepared is not None else prepare_preview(plan)
+        self._rows = list(data.rows)
+        self._colors = _slots_to_colors(data.color_slots, self._theme)
         stocks = [row.stock_mm for row in self._rows]
         self._max_stock = max_stock_mm or (max(stocks) if stocks else 1)
         # Inventory labels ("7.300 ม. คงคลัง") are wider than the plain length.
         metrics = self.fontMetrics()
+        labels = {stock_label(row) for row in self._rows}
         self._right_label = max(
-            [RIGHT_LABEL] + [metrics.horizontalAdvance(stock_label(row)) + 4 for row in self._rows]
+            [RIGHT_LABEL] + [metrics.horizontalAdvance(label) + 4 for label in labels]
         )
         self.updateGeometry()
         self.setMinimumHeight(self.sizeHint().height())

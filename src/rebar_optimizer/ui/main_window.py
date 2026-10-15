@@ -79,7 +79,7 @@ from rebar_optimizer.ui import animations, user_settings
 from rebar_optimizer.ui.theme import Theme, current_theme
 from rebar_optimizer.ui.user_settings import UserSettings
 from rebar_optimizer.ui.widgets.collapsible import CollapsibleSection
-from rebar_optimizer.ui.widgets.plan_preview import PlanPreview
+from rebar_optimizer.ui.widgets.plan_preview import PlanPreview, PreviewData, prepare_preview
 from rebar_optimizer.ui.widgets.toast import Toast
 from rebar_optimizer.ui.worker import PlanOutcome, PlanWorker, start_worker
 
@@ -644,7 +644,7 @@ class MainWindow(QMainWindow):
     def cancel_computation(self) -> None:
         if self._worker is not None:
             self._worker.cancel()
-            self.status_label.setText(GUI_TEXT["status_cancelling"])
+            self._set_running_status(GUI_TEXT["status_cancelling"])
             self.cancel_button.setEnabled(False)
 
     def wait_for_worker(self, timeout_ms: int = 10_000) -> bool:
@@ -674,6 +674,11 @@ class MainWindow(QMainWindow):
         self._status_since = time.monotonic()
         animations.set_text_faded(self.status_label, text)
 
+    def _stop_status_ticks(self) -> None:
+        """The run has an outcome: the final status text must not be overwritten."""
+        self._status_timer.stop()
+        self._status_base = ""
+
     def _tick_status(self) -> None:
         if not self.is_running() or not self._status_base:
             return
@@ -684,6 +689,7 @@ class MainWindow(QMainWindow):
             )
 
     def _on_succeeded(self, outcome: PlanOutcome) -> None:
+        self._stop_status_ticks()
         self._outcome = outcome
         self._last_saved = None
         self.saved_label.clear()
@@ -692,6 +698,7 @@ class MainWindow(QMainWindow):
         self._show_results(outcome)
 
     def _on_input_invalid(self, exc: InputValidationError | SettingsError) -> None:
+        self._stop_status_ticks()
         self.status_label.setText(GUI_TEXT["status_failed"])
         header = (
             GUI_TEXT["error_input_header"]
@@ -701,10 +708,12 @@ class MainWindow(QMainWindow):
         self._show_issues(header, exc.issues)
 
     def _on_cancelled(self) -> None:
+        self._stop_status_ticks()
         animations.animate_progress(self.progress_bar, 0)
         animations.set_text_faded(self.status_label, GUI_TEXT["status_cancelled"])
 
     def _on_crashed(self, message: str) -> None:
+        self._stop_status_ticks()
         self.status_label.setText(GUI_TEXT["status_failed"])
         self._log(message)
         text = GUI_TEXT["unexpected"].format(log_path=self._log_path or "-")
@@ -714,8 +723,7 @@ class MainWindow(QMainWindow):
         # Only now is it safe to drop the last references to the thread and worker.
         self._worker = None
         self._thread = None
-        self._status_timer.stop()
-        self._status_base = ""
+        self._stop_status_ticks()
         self.cancel_button.setEnabled(True)
         self._update_actions()
 
@@ -822,7 +830,7 @@ class MainWindow(QMainWindow):
         )
         fit_list_height(self.bar_counts_list, MAX_VISIBLE_COUNT_ROWS)
 
-        self._show_previews(plan)
+        self._show_previews(plan, outcome.previews)
 
         self.warnings_list.clear()
         messages = [th.format_issue(i) for i in (*outcome.source.warnings, *plan.issues)]
@@ -835,14 +843,16 @@ class MainWindow(QMainWindow):
         QGuiApplication.clipboard().setText("\n".join(lines))
         self.toast.show_message(GUI_TEXT["copied"])
 
-    def _show_previews(self, plan: CuttingPlan) -> None:
+    def _show_previews(self, plan: CuttingPlan, prepared: Sequence[PreviewData] = ()) -> None:
         self.preview_tabs.clear()
         self.previews = []
         stocks = [g.bar.stock_length_mm for sp in plan.sizes for g in sp.groups]
         longest = max(stocks, default=1)
-        for size_plan in plan.sizes:
+        if len(prepared) != len(plan.sizes):
+            prepared = [prepare_preview(sp) for sp in plan.sizes]
+        for size_plan, data in zip(plan.sizes, prepared, strict=True):
             preview = PlanPreview(self._theme)
-            preview.set_plan(size_plan, max_stock_mm=longest)
+            preview.set_plan(size_plan, max_stock_mm=longest, prepared=data)
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.Shape.NoFrame)
