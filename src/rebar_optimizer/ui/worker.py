@@ -12,6 +12,7 @@ the thread's own ``finished`` signal.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -143,8 +144,8 @@ class ReadWorker(QObject):
 
 
 class SaveWorker(QObject):
-    """Writes the Excel file off the GUI thread: a 100,000-row result takes
-    minutes in openpyxl and would otherwise freeze the window.
+    """Writes an output file (Excel or PDF) off the GUI thread: a 100,000-row
+    result takes minutes and would otherwise freeze the window.
 
     Signal order: exactly one of ``saved`` / ``failed`` / ``crashed``, then ``finished``.
     """
@@ -152,20 +153,23 @@ class SaveWorker(QObject):
     saved = Signal(object)
     """``Path`` written."""
     failed = Signal(object)
-    """``OutputWriteError`` (e.g. the file is open in Excel)."""
+    """``OutputWriteError`` (e.g. the file is open in Excel or a PDF viewer)."""
     crashed = Signal(str)
     finished = Signal()
 
-    def __init__(self, path: Path, plan: CuttingPlan, source: WriteSource) -> None:
+    def __init__(self, write: Callable[[], Path]) -> None:
+        """``write`` runs on the worker thread and returns the path written."""
         super().__init__()
-        self._path = path
-        self._plan = plan
-        self._source = source
+        self._write = write
+
+    @classmethod
+    def excel(cls, path: Path, plan: CuttingPlan, source: WriteSource) -> SaveWorker:
+        return cls(lambda: write_plan(path, plan, source))
 
     @Slot()
     def run(self) -> None:
         try:
-            self.saved.emit(write_plan(self._path, self._plan, self._source))
+            self.saved.emit(self._write())
         except OutputWriteError as exc:
             self.failed.emit(exc)
         except Exception as exc:

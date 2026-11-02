@@ -20,7 +20,6 @@ from rebar_optimizer import __version__
 from rebar_optimizer.i18n.th import GUI_TEXT
 from rebar_optimizer.logging_config import setup_logging
 from rebar_optimizer.ui.main_window import MainWindow
-from rebar_optimizer.ui.theme import apply_theme
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +71,6 @@ def main(argv: Sequence[str] | None = None, started: float | None = None) -> int
     app.setApplicationName("Rebar Optimizer")
     app.setApplicationVersion(__version__)
     app.setWindowIcon(app_icon())
-    apply_theme(app)
     window = MainWindow(log_path=log_path)
     window.show()
     QTimer.singleShot(0, lambda: _report_startup(app, started))

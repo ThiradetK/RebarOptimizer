@@ -7,12 +7,20 @@ fast inside a ``QScrollArea``.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QRect, QRectF, QSize, Qt
-from PySide6.QtGui import QBrush, QColor, QHelpEvent, QPainter, QPaintEvent, QPen
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QHelpEvent,
+    QPainter,
+    QPaintEvent,
+    QPen,
+    QTransform,
+)
 from PySide6.QtWidgets import QToolTip, QWidget
 
 from rebar_optimizer.domain.models import SizePlan, StockSource
@@ -152,12 +160,91 @@ def no_color_slots(nos: Iterable[str]) -> dict[str, int]:
 def no_colors(nos: Iterable[str], theme: Theme = LIGHT) -> dict[str, QColor]:
     """Colour per No: palette slots in natural No order, so the same input always
     gets the same colours and neighbouring numbers never share one (up to 12)."""
-    return _slots_to_colors(no_color_slots(nos), theme)
+    return slots_to_colors(no_color_slots(nos), theme)
 
 
-def _slots_to_colors(slots: dict[str, int], theme: Theme) -> dict[str, QColor]:
+def slots_to_colors(slots: dict[str, int], theme: Theme) -> dict[str, QColor]:
     palette = [QColor(c) for c in (PALETTE_DARK if theme.dark else PALETTE_LIGHT)]
     return {no: palette[slot] for no, slot in slots.items()}
+
+
+@dataclass(frozen=True)
+class BarStyle:
+    """Colours of the non-piece parts of a bar (shared by the screen and the PDF)."""
+
+    kerf: QColor
+    waste: QColor
+    reusable: QColor
+    hatch: QBrush
+    border: QColor
+    piece_text: QColor
+
+
+def bar_style(theme: Theme, hatch_scale: float = 1.0) -> BarStyle:
+    """``hatch_scale``: pattern brushes are in device pixels, so scale them up on a
+    high-resolution device (PDF) to keep the hatching visible."""
+    hatch = QBrush(QColor(theme.success).darker(130), Qt.BrushStyle.BDiagPattern)
+    if hatch_scale != 1.0:
+        hatch.setTransform(QTransform.fromScale(hatch_scale, hatch_scale))
+    return BarStyle(
+        kerf=QColor("#0d0d0d" if theme.dark else "#2b2b2b"),
+        waste=QColor("#5b5f66" if theme.dark else "#b0b4ba"),
+        reusable=QColor(theme.success).lighter(90 if theme.dark else 150),
+        hatch=hatch,
+        border=QColor(theme.border),
+        piece_text=QColor("#1f2328"),
+    )
+
+
+PieceLabels = Callable[[Segment], Sequence[str]]
+"""Label candidates for a piece, longest first; the first that fits is drawn."""
+
+
+def screen_piece_labels(segment: Segment) -> Sequence[str]:
+    return (f"No.{segment.no}",)
+
+
+def paint_bar(
+    painter: QPainter,
+    row: Row,
+    bar: QRectF,
+    colors: dict[str, QColor],
+    *,
+    style: BarStyle,
+    labels: PieceLabels,
+    visible_width: float | None = None,
+) -> None:
+    """Draw one bar into ``bar`` (its full stock length), clipped to ``visible_width``."""
+    scale = bar.width() / row.stock_mm
+    metrics = painter.fontMetrics()
+    painter.save()
+    width = bar.width() if visible_width is None else visible_width
+    painter.setClipRect(QRectF(bar.left(), bar.top(), width, bar.height()))
+    kerf_rects: list[QRectF] = []
+    for segment in row.segments:
+        x = bar.left() + segment.start_mm * scale
+        rect = QRectF(x, bar.top(), max(segment.length_mm * scale, 1.0), bar.height())
+        if segment.kind is SegmentKind.PIECE:
+            painter.fillRect(rect, colors[segment.no])
+            fits = (t for t in labels(segment) if metrics.horizontalAdvance(t) + 6 < rect.width())
+            label = next(fits, None)
+            if label is not None:
+                painter.setPen(QPen(style.piece_text))
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+        elif segment.kind is SegmentKind.KERF:
+            kerf_rects.append(rect)
+        elif segment.kind is SegmentKind.REUSABLE:
+            painter.fillRect(rect, style.reusable)
+            painter.fillRect(rect, style.hatch)
+        else:
+            painter.fillRect(rect, style.waste)
+    # Kerf lines last: a 3 mm cut is often narrower than a pixel and would
+    # otherwise be painted over by the next piece.
+    for rect in kerf_rects:
+        painter.fillRect(rect, style.kerf)
+    painter.setPen(QPen(style.border))
+    painter.drawRect(bar)
+    painter.restore()
 
 
 @dataclass(frozen=True)
@@ -182,6 +269,7 @@ class PlanPreview(QWidget):
         self._theme = theme
         self._rows: list[Row] = []
         self._colors: dict[str, QColor] = {}
+        self._color_slots: dict[str, int] = {}
         self._max_stock = 1
         self._grow = 1.0
         self._right_label = RIGHT_LABEL
@@ -200,7 +288,8 @@ class PlanPreview(QWidget):
         """Show ``plan``; pass ``prepared`` (from ``prepare_preview``) to skip the layout work."""
         data = prepared if prepared is not None else prepare_preview(plan)
         self._rows = list(data.rows)
-        self._colors = _slots_to_colors(data.color_slots, self._theme)
+        self._color_slots = data.color_slots
+        self._colors = slots_to_colors(data.color_slots, self._theme)
         stocks = [row.stock_mm for row in self._rows]
         self._max_stock = max_stock_mm or (max(stocks) if stocks else 1)
         # Inventory labels ("7.300 ม. คงคลัง") are wider than the plain length.
@@ -212,6 +301,12 @@ class PlanPreview(QWidget):
         self.updateGeometry()
         self.setMinimumHeight(self.sizeHint().height())
         animations.drive(self, "grow", GROW_TOTAL_MS, self._set_grow)
+        self.update()
+
+    def set_theme(self, theme: Theme) -> None:
+        """Recolour in place (no grow animation: the plan itself has not changed)."""
+        self._theme = theme
+        self._colors = slots_to_colors(self._color_slots, theme)
         self.update()
 
     def rows(self) -> list[Row]:
@@ -274,14 +369,9 @@ class PlanPreview(QWidget):
         first = max(0, (event.rect().top() - TOP) // ROW_HEIGHT)
         last = min(len(self._rows) - 1, (event.rect().bottom() - TOP) // ROW_HEIGHT)
         scale = self._px_per_mm()
-        metrics = painter.fontMetrics()
         text_pen = QPen(QColor(t.text))
         muted_pen = QPen(QColor(t.text_muted))
-        kerf_color = QColor("#2b2b2b") if not t.dark else QColor("#0d0d0d")
-        waste_color = QColor("#b0b4ba") if not t.dark else QColor("#5b5f66")
-        reusable_color = QColor(t.success).lighter(150 if not t.dark else 90)
-        hatch = QBrush(QColor(t.success).darker(130), Qt.BrushStyle.BDiagPattern)
-        border = QPen(QColor(t.border))
+        style = bar_style(t)
 
         for index in range(first, last + 1):
             row = self._rows[index]
@@ -294,35 +384,16 @@ class PlanPreview(QWidget):
                 GUI_TEXT["preview_count"].format(count=row.count),
             )
             full_width = row.stock_mm * scale
-            visible_width = full_width * self._row_fraction(index)
             left = self._bar_left()
-            painter.save()
-            painter.setClipRect(QRectF(left, bar_top, visible_width, BAR_HEIGHT))
-            kerf_rects: list[QRectF] = []
-            for segment in row.segments:
-                x = left + segment.start_mm * scale
-                w = max(segment.length_mm * scale, 1.0)
-                rect = QRectF(x, bar_top, w, BAR_HEIGHT)
-                if segment.kind is SegmentKind.PIECE:
-                    painter.fillRect(rect, self._colors[segment.no])
-                    label = f"No.{segment.no}"
-                    if metrics.horizontalAdvance(label) + 6 < w:
-                        painter.setPen(QPen(QColor("#1f2328")))
-                        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
-                elif segment.kind is SegmentKind.KERF:
-                    kerf_rects.append(rect)
-                elif segment.kind is SegmentKind.REUSABLE:
-                    painter.fillRect(rect, reusable_color)
-                    painter.fillRect(rect, hatch)
-                else:
-                    painter.fillRect(rect, waste_color)
-            # Kerf lines last: a 3 mm cut is often narrower than a pixel and would
-            # otherwise be painted over by the next piece.
-            for rect in kerf_rects:
-                painter.fillRect(rect, kerf_color)
-            painter.setPen(border)
-            painter.drawRect(QRectF(left, bar_top, full_width, BAR_HEIGHT))
-            painter.restore()
+            paint_bar(
+                painter,
+                row,
+                QRectF(left, bar_top, full_width, BAR_HEIGHT),
+                self._colors,
+                style=style,
+                labels=screen_piece_labels,
+                visible_width=full_width * self._row_fraction(index),
+            )
             painter.setPen(text_pen)
             painter.drawText(
                 QRect(int(left + full_width) + GAP, y, self._right_label, ROW_HEIGHT),
