@@ -7,9 +7,12 @@
 
 import shutil
 import sys
+import tomllib
 from importlib import metadata
 from pathlib import Path
 
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 from PyInstaller.utils.hooks import collect_all
 
 ROOT = Path(SPECPATH).resolve().parent  # noqa: F821 - provided by PyInstaller
@@ -17,22 +20,26 @@ SRC = ROOT / "src"
 PACKAGING = ROOT / "packaging"
 NAME = "RebarOptimizer"
 
-# Distributions shipped in the bundle whose license files are copied to licenses/.
-LICENSED_DISTRIBUTIONS = [
-    "PySide6-Essentials",
-    "shiboken6",
-    "ortools",
-    "openpyxl",
-    "et-xmlfile",
-    "numpy",
-    "pandas",
-    "protobuf",
-    "absl-py",
-    "immutabledict",
-    "python-dateutil",
-    "six",
-    "tzdata",
-]
+
+def _runtime_distributions() -> list[metadata.Distribution]:
+    """The app's runtime dependencies (pyproject) and everything they require,
+    as installed. Derived rather than listed by hand: a hard-coded list broke
+    the build when python-dateutil 4 stopped requiring six."""
+    with open(ROOT / "pyproject.toml", "rb") as file:
+        roots = tomllib.load(file)["project"]["dependencies"]
+    found: dict[str, metadata.Distribution] = {}
+    pending = [Requirement(spec) for spec in roots]
+    while pending:
+        requirement = pending.pop()
+        key = canonicalize_name(requirement.name)
+        if key in found:
+            continue
+        found[key] = dist = metadata.distribution(requirement.name)
+        for spec in dist.requires or []:
+            dependency = Requirement(spec)
+            if dependency.marker is None or dependency.marker.evaluate({"extra": ""}):
+                pending.append(dependency)
+    return [found[key] for key in sorted(found)]
 
 # Qt modules the app never imports (keeps the zip small; PLAN.md phase 7).
 QT_EXCLUDES = [
@@ -113,8 +120,7 @@ def _copy_licenses(target: Path) -> None:
         shutil.rmtree(target)
     shutil.copytree(PACKAGING / "licenses", target)
     versions = []
-    for dist_name in LICENSED_DISTRIBUTIONS:
-        dist = metadata.distribution(dist_name)
+    for dist in _runtime_distributions():
         versions.append(f"{dist.metadata['Name']} {dist.version}")
         for file in dist.files or []:
             name = Path(str(file)).name.lower()
