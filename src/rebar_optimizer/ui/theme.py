@@ -81,6 +81,11 @@ def current_theme() -> Theme:
     return DARK if system_prefers_dark() else LIGHT
 
 
+def resolve_theme(choice: str) -> Theme:
+    """The saved choice (``"light"`` / ``"dark"`` / anything else = follow Windows)."""
+    return {"light": LIGHT, "dark": DARK}.get(choice) or current_theme()
+
+
 def app_font() -> QFont:
     font = QFont()
     font.setFamilies(FONT_FAMILIES)

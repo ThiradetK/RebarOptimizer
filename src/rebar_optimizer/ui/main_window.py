@@ -33,8 +33,10 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -87,8 +89,9 @@ from rebar_optimizer.services import planner
 from rebar_optimizer.services.cancel import ProgressEvent, ProgressKind
 from rebar_optimizer.services.summary import bar_counts, plan_totals, summarize_size
 from rebar_optimizer.ui import animations, user_settings
-from rebar_optimizer.ui.theme import Theme, current_theme
-from rebar_optimizer.ui.user_settings import UserSettings
+from rebar_optimizer.ui.pdf_export import write_pdf
+from rebar_optimizer.ui.theme import DARK, LIGHT, Theme, apply_theme, resolve_theme
+from rebar_optimizer.ui.user_settings import PDF_PAPERS, UserSettings
 from rebar_optimizer.ui.widgets.collapsible import CollapsibleSection
 from rebar_optimizer.ui.widgets.plan_preview import PlanPreview, PreviewData, prepare_preview
 from rebar_optimizer.ui.widgets.toast import Toast
@@ -193,12 +196,14 @@ class MainWindow(QMainWindow):
         log_path: Path | None = None,
         theme: Theme | None = None,
     ) -> None:
+        """``theme``: force a theme (tests); otherwise the saved choice is used."""
         super().__init__()
-        self._theme = theme or current_theme()
         self.previews: list[PlanPreview] = []
         self._settings_path = settings_path
         self._log_path = log_path
         self._user = user_settings.load(settings_path)
+        self._theme = theme or resolve_theme(self._user.theme)
+        self._apply_app_theme()
         self._outcome: PlanOutcome | None = None
         self._worker: PlanWorker | ReadWorker | None = None
         self._thread: QThread | None = None
@@ -288,6 +293,15 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 6, 12)
+
+        theme_row = QHBoxLayout()
+        theme_row.addStretch()
+        self.theme_button = QPushButton()
+        self.theme_button.setToolTip(GUI_TEXT["theme_tooltip"])
+        self.theme_button.clicked.connect(self.toggle_theme)
+        self._update_theme_button()
+        theme_row.addWidget(self.theme_button)
+        layout.addLayout(theme_row)
 
         input_group = QGroupBox(GUI_TEXT["input_group"])
         input_layout = QVBoxLayout(input_group)
@@ -476,12 +490,44 @@ class MainWindow(QMainWindow):
         self.saved_label = QLabel()
         self.saved_label.setObjectName("muted")
         self.saved_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.pdf_button = QPushButton(GUI_TEXT["save_pdf"])
+        self.pdf_button.clicked.connect(lambda: self.save_pdf())
+        self.paper_combo = QComboBox()
+        self.paper_combo.addItems(list(PDF_PAPERS))
+        self.paper_combo.setToolTip(GUI_TEXT["paper_tooltip"])
         save_row.addWidget(self.save_button)
+        save_row.addWidget(self.pdf_button)
+        save_row.addWidget(self.paper_combo)
         save_row.addWidget(self.open_file_button)
         save_row.addWidget(self.open_folder_button)
         save_row.addWidget(self.saved_label, 1)
         layout.addLayout(save_row)
         return panel
+
+    # --- theme ------------------------------------------------------------------------
+
+    @property
+    def theme(self) -> Theme:
+        return self._theme
+
+    def _apply_app_theme(self) -> None:
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            apply_theme(app, self._theme)
+
+    def toggle_theme(self) -> None:
+        """Switch light <-> dark at once; the choice is remembered from then on."""
+        self._theme = LIGHT if self._theme.dark else DARK
+        self._user.theme = "dark" if self._theme.dark else "light"
+        self._apply_app_theme()
+        for preview in self.previews:
+            preview.set_theme(self._theme)
+        self._update_theme_button()
+
+    def _update_theme_button(self) -> None:
+        self.theme_button.setText(
+            GUI_TEXT["theme_to_light" if self._theme.dark else "theme_to_dark"]
+        )
 
     # --- user settings --------------------------------------------------------------
 
@@ -497,6 +543,7 @@ class MainWindow(QMainWindow):
         self.time_limit_spin.setValue(u.time_limit_s)
         self.animations_check.setChecked(u.animations)
         animations.set_user_enabled(u.animations)
+        self.paper_combo.setCurrentText(u.pdf_paper)
         self.advanced_section.set_expanded(u.advanced_open, animate=False)
         if u.window_geometry:
             self.restoreGeometry(QByteArray.fromBase64(u.window_geometry.encode("ascii")))
@@ -513,6 +560,7 @@ class MainWindow(QMainWindow):
         u.kerf_mm = self.kerf_spin.value()
         u.time_limit_s = self.time_limit_spin.value()
         u.animations = self.animations_check.isChecked()
+        u.pdf_paper = self.paper_combo.currentText()
         u.advanced_open = self.advanced_section.is_expanded()
         u.window_geometry = bytes(self.saveGeometry().toBase64().data()).decode("ascii")
         u.splitter_state = bytes(self.splitter.saveState().toBase64().data()).decode("ascii")
@@ -571,7 +619,8 @@ class MainWindow(QMainWindow):
             widget.setEnabled(not running)
         self.kerf_spin.setEnabled(not running and self.kerf_check.isChecked())
         has_result = self._outcome is not None
-        self.save_button.setEnabled(has_result and not running)
+        for control in (self.save_button, self.pdf_button, self.paper_combo):
+            control.setEnabled(has_result and not running)
         self.open_file_button.setVisible(self._last_saved is not None)
         self.open_folder_button.setVisible(self._last_saved is not None)
 
@@ -987,18 +1036,13 @@ class MainWindow(QMainWindow):
         """
         if self._outcome is None or self.is_busy():
             return False
+        path = path or self._ask_save_path(
+            "dialog_save_title", self.default_output_path(), "xlsx_filter"
+        )
         if path is None:
-            name, _ = QFileDialog.getSaveFileName(
-                self,
-                GUI_TEXT["dialog_save_title"],
-                str(self.default_output_path()),
-                GUI_TEXT["xlsx_filter"],
-            )
-            if not name:
-                return False
-            path = Path(name)
+            return False
         source = self._outcome.source
-        worker = SaveWorker(
+        worker = SaveWorker.excel(
             path,
             self._outcome.plan,
             WriteSource(
@@ -1010,13 +1054,42 @@ class MainWindow(QMainWindow):
                 inventory_sheet=source.inventory_sheet,
             ),
         )
+        return self._start_save(worker, GUI_TEXT["status_saving"], wait)
+
+    def save_pdf(self, path: Path | None = None, *, wait: bool = False) -> bool:
+        """Save the cutting sheet PDF in the background (same rules as ``save_result``)."""
+        outcome = self._outcome
+        if outcome is None or self.is_busy():
+            return False
+        default = self.default_output_path().with_name(
+            GUI_TEXT["default_pdf"].format(stamp=datetime.now().strftime("%Y%m%d_%H%M"))
+        )
+        path = path or self._ask_save_path("dialog_save_pdf_title", default, "pdf_filter")
+        if path is None:
+            return False
+        paper = self.paper_combo.currentText()
+        header = self.source_label.text()
+
+        def write() -> Path:
+            previews = outcome.previews or tuple(prepare_preview(sp) for sp in outcome.plan.sizes)
+            return write_pdf(path, outcome.plan, previews, header, paper)
+
+        return self._start_save(SaveWorker(write), GUI_TEXT["status_saving_pdf"], wait)
+
+    def _ask_save_path(self, title_key: str, default: Path, filter_key: str) -> Path | None:
+        name, _ = QFileDialog.getSaveFileName(
+            self, GUI_TEXT[title_key], str(default), GUI_TEXT[filter_key]
+        )
+        return Path(name) if name else None
+
+    def _start_save(self, worker: SaveWorker, status: str, wait: bool) -> bool:
         worker.saved.connect(self._on_saved)
         worker.failed.connect(self._on_save_failed)
         worker.crashed.connect(self._on_save_crashed)
         self._save_worker = worker
         self._save_succeeded = False
-        self.progress_bar.setRange(0, 0)  # busy: openpyxl reports no progress
-        self._set_running_status(GUI_TEXT["status_saving"])
+        self.progress_bar.setRange(0, 0)  # busy: writers report no progress
+        self._set_running_status(status)
         self._status_timer.start()
         self._update_actions()
         self._save_thread = start_worker(worker)

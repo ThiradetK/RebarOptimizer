@@ -77,3 +77,11 @@ def test_save_failure_is_not_raised(tmp_path: Path) -> None:
 
 def test_tests_never_use_the_real_appdata_file() -> None:
     assert user_settings.default_path().name == "user_settings.json"  # conftest isolation
+
+
+def test_unknown_theme_falls_back_to_system(tmp_path: Path) -> None:
+    path = tmp_path / "s.json"
+    path.write_text('{"theme": "purple"}', encoding="utf-8")
+    assert user_settings.load(path).theme == "system"
+    path.write_text('{"theme": "dark"}', encoding="utf-8")
+    assert user_settings.load(path).theme == "dark"

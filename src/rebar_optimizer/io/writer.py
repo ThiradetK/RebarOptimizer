@@ -14,7 +14,7 @@ import os
 import tempfile
 import unicodedata
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -90,7 +90,7 @@ def write_plan(
     """Write the output workbook. Raises ``OutputWriteError`` if it cannot be saved."""
     path = Path(path)
     workbook = build_workbook(plan, source, created_at or datetime.now())
-    _save_atomically(workbook, path)
+    save_atomically(path, workbook.save)
     return path
 
 
@@ -610,10 +610,13 @@ def _unit_weights(plan: CuttingPlan, issues: list[Issue]) -> dict[str, float | N
     return weights
 
 
-def _save_atomically(workbook: openpyxl.Workbook, path: Path) -> None:
+def save_atomically(path: Path, write: Callable[[Path], object]) -> None:
+    """Let ``write`` fill a temporary file next to ``path``, then replace ``path``
+    with it, so a failed write never leaves a broken file behind. Raises
+    ``OutputWriteError`` (``OUTPUT_LOCKED`` when the target is open elsewhere)."""
     directory = path.parent if str(path.parent) else Path()
     try:
-        handle, temp_name = tempfile.mkstemp(prefix="~rebar_", suffix=".xlsx", dir=directory)
+        handle, temp_name = tempfile.mkstemp(prefix="~rebar_", suffix=path.suffix, dir=directory)
     except OSError as exc:
         raise OutputWriteError(
             [Issue.error(IssueCode.OUTPUT_FAILED, path=str(path), reason=str(exc))]
@@ -621,7 +624,7 @@ def _save_atomically(workbook: openpyxl.Workbook, path: Path) -> None:
     os.close(handle)
     temp_path = Path(temp_name)
     try:
-        workbook.save(temp_path)
+        write(temp_path)
         os.replace(temp_path, path)
     except PermissionError as exc:
         raise OutputWriteError(

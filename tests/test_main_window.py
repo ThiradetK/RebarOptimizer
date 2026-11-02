@@ -6,6 +6,7 @@ from pathlib import Path
 import openpyxl
 import pytest
 from PySide6.QtGui import QGuiApplication
+from PySide6.QtWidgets import QApplication
 from pytestqt.qtbot import QtBot
 
 from benchmarks.generate import PRESETS, make_pieces, write_xlsx
@@ -439,3 +440,45 @@ def test_oversize_dialog_defaults_to_stop(
     assert "12 รายการ (12 ชิ้น)" in seen[0] and "12.000 ม." in seen[0]
     assert "อย่างน้อย 13.011 ม." in seen[1]
     assert "… และอีก 2 รายการ" in seen[1]
+
+
+def test_theme_toggle_recolours_everything_and_is_remembered(qtbot: QtBot, tmp_path: Path) -> None:
+    first = MainWindow()
+    qtbot.addWidget(first)
+    first.choose_input(write_template(tmp_path / "t.xlsx"))
+    compute(qtbot, first)
+    preview = first.previews[0]
+    start = first.theme
+    before = preview.colors()
+
+    first.theme_button.click()
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    assert first.theme.dark is not start.dark
+    assert first.theme.window in app.styleSheet()
+    assert preview.colors() != before  # recoloured in place, same widget
+    assert (
+        first.theme_button.text()
+        == GUI_TEXT["theme_to_light" if first.theme.dark else "theme_to_dark"]
+    )
+    chosen = first.theme
+    first.close()
+
+    second = MainWindow()
+    qtbot.addWidget(second)
+    assert second.theme is chosen
+
+
+def test_pdf_cutting_sheet_is_saved_in_the_background(
+    qtbot: QtBot, window: MainWindow, tmp_path: Path
+) -> None:
+    assert not window.pdf_button.isEnabled()
+    window.choose_input(write_template(tmp_path / "t.xlsx"))
+    compute(qtbot, window)
+    assert window.pdf_button.isEnabled()
+    window.paper_combo.setCurrentText("A3")
+    out = tmp_path / "sheet.pdf"
+    assert window.save_pdf(out, wait=True)
+    assert out.read_bytes().startswith(b"%PDF")
+    assert window.status_label.text() == GUI_TEXT["status_saved"]
+    assert window.collect_user_settings().pdf_paper == "A3"

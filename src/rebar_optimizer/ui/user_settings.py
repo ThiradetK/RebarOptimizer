@@ -21,6 +21,10 @@ APP_DIR_NAME = "RebarOptimizer"
 FILE_NAME = "settings.json"
 DEFAULT_KERF_MM = 3
 """Pre-filled kerf when the checkbox is ticked (PLAN.md §9 default)."""
+THEME_SYSTEM = "system"
+THEME_CHOICES = (THEME_SYSTEM, "light", "dark")
+PDF_PAPERS = ("A4", "A3")
+"""Paper sizes for the PDF cutting sheet (landscape)."""
 
 
 @dataclass
@@ -31,6 +35,9 @@ class UserSettings:
     kerf_mm: int = DEFAULT_KERF_MM
     time_limit_s: float = 30.0
     animations: bool = True
+    theme: str = THEME_SYSTEM
+    """``"system"`` follows Windows; ``"light"`` / ``"dark"`` once the user toggles."""
+    pdf_paper: str = PDF_PAPERS[0]
     advanced_open: bool = False
     window_geometry: str = ""
     """Base64 of ``QWidget.saveGeometry()``."""
@@ -68,6 +75,14 @@ def load(path: Path | None = None) -> UserSettings:
     return UserSettings(**values)  # type: ignore[arg-type]
 
 
+_CHOICES: dict[str, tuple[str, ...]] = {
+    "stock_mode": tuple(m.value for m in StockMode),
+    "theme": THEME_CHOICES,
+    "pdf_paper": PDF_PAPERS,
+}
+"""String settings restricted to a fixed set of values."""
+
+
 def _valid(name: str, value: object, default: object) -> bool:
     if isinstance(default, bool):
         return isinstance(value, bool)
@@ -78,9 +93,8 @@ def _valid(name: str, value: object, default: object) -> bool:
         return ok
     if isinstance(default, float):
         return isinstance(value, int | float) and not isinstance(value, bool) and value > 0
-    if name == "stock_mode":
-        return value in {m.value for m in StockMode}
-    return isinstance(value, str)
+    choices = _CHOICES.get(name)
+    return value in choices if choices is not None else isinstance(value, str)
 
 
 def save(settings: UserSettings, path: Path | None = None) -> None:
