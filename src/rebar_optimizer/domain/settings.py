@@ -21,8 +21,60 @@ class StockMode(StrEnum):
     """Each size uses exactly one stock length (D4)."""
 
 
+MAX_SOLVER_THREADS = 8
+"""CP-SAT gains little beyond this many threads on these models."""
+
+
 def default_num_workers() -> int:
-    return min(8, os.cpu_count() or 1)
+    return min(MAX_SOLVER_THREADS, os.cpu_count() or 1)
+
+
+class PerformanceMode(StrEnum):
+    """How many sizes may be planned at the same time."""
+
+    ECO = "eco"
+    """One size at a time."""
+    BALANCED = "balanced"
+    PERFORMANCE = "performance"
+
+
+@dataclass(frozen=True)
+class Resources:
+    size_workers: int
+    """Sizes planned at the same time (1 = one after another)."""
+    num_workers: int
+    """CP-SAT threads inside each size."""
+
+
+CPUS_PER_SIZE = 4
+"""Logical processors a size needs for itself. A size's ``MAX_SOLVER_THREADS``
+solver threads keep five to six of them busy on average (measured), so one
+size per four processors is where planning side by side stops paying off."""
+MODE_SIZE_LIMIT = {
+    PerformanceMode.ECO: 1,
+    PerformanceMode.BALANCED: 2,
+    PerformanceMode.PERFORMANCE: 4,
+}
+
+
+def plan_resources(
+    mode: PerformanceMode, logical_cpus: int | None = None, size_workers: int | None = None
+) -> Resources:
+    """How many sizes to plan side by side on this machine; ``size_workers``
+    overrides the automatic choice (at most one per logical processor).
+
+    The solver threads per size are never reduced: with fewer than
+    ``MAX_SOLVER_THREADS`` CP-SAT drops the sub-solvers that prove optimality
+    (the medium benchmark went from 6 s, all optimal, to 58 s with sizes left
+    unproven at 4 threads). The modes only choose how many sizes overlap.
+    """
+    cpus = max(1, logical_cpus if logical_cpus is not None else os.cpu_count() or 1)
+    if size_workers is None:
+        size_workers = min(MODE_SIZE_LIMIT[mode], cpus // CPUS_PER_SIZE)
+    return Resources(
+        size_workers=max(1, min(size_workers, cpus)),
+        num_workers=min(MAX_SOLVER_THREADS, cpus),
+    )
 
 
 @dataclass(frozen=True)
@@ -34,6 +86,10 @@ class OptimizerSettings:
     max_patterns: int = 50_000
     random_seed: int = 0
     num_workers: int = field(default_factory=default_num_workers)
+    """CP-SAT threads per size."""
+    size_workers: int = 1
+    """Sizes planned at the same time, each in its own process; 1 plans them
+    one after another in the calling process (D9)."""
 
     def validate(self) -> None:
         """Raise ``SettingsError`` listing every invalid setting."""
@@ -62,6 +118,8 @@ class OptimizerSettings:
             issues.append(Issue.error(IssueCode.MAX_PATTERNS_NOT_POSITIVE, value=self.max_patterns))
         if self.num_workers <= 0:
             issues.append(Issue.error(IssueCode.NUM_WORKERS_NOT_POSITIVE, value=self.num_workers))
+        if self.size_workers <= 0:
+            issues.append(Issue.error(IssueCode.SIZE_WORKERS_NOT_POSITIVE, value=self.size_workers))
         if issues:
             raise SettingsError(issues)
 

@@ -98,3 +98,25 @@ def test_bar_counts_per_size_and_length(tmp_path: Path, capsys: Capture) -> None
     counted = [line for line in lines if "จำนวน" in line and line.endswith("เมตร")]
     assert counted, out
     assert all(line.split()[1] in {"DB12", "DB16", "RB9"} for line in counted)
+
+
+def test_workers_option_plans_sizes_side_by_side(tmp_path: Path, capsys: Capture) -> None:
+    def stock_totals(out: str) -> list[str]:
+        # Equally good plans may arrange bars differently (D2): compare what is bought.
+        headers = [line for line in out.splitlines() if line.startswith("Size ") and "—" in line]
+        totals = [line.split("|")[0] for line in out.splitlines() if "เหล็กรวม" in line]
+        return headers + totals
+
+    path = write_template(tmp_path / "t.xlsx")
+    assert main([str(path), "--stock", "10,12"]) == EXIT_OK
+    sequential = stock_totals(capsys.readouterr().out)
+    assert main([str(path), "--stock", "10,12", "--workers", "2", "--mode", "eco"]) == EXIT_OK
+    captured = capsys.readouterr()
+    assert sequential and stock_totals(captured.out) == sequential
+    assert "Size DB16: " in captured.err  # stage lines name their size
+
+
+def test_workers_must_be_positive(tmp_path: Path, capsys: Capture) -> None:
+    path = write_template(tmp_path / "t.xlsx")
+    assert main([str(path), "--stock", "10", "--workers", "0"]) == EXIT_INPUT
+    assert "จำนวน worker" in capsys.readouterr().err

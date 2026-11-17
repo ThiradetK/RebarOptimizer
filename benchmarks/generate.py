@@ -31,6 +31,7 @@ PRESETS: dict[str, Preset] = {
     "small": Preset(sizes=2, lengths_per_size=6, total_pieces=60),
     "medium": Preset(sizes=5, lengths_per_size=15, total_pieces=500),
     "large": Preset(sizes=5, lengths_per_size=40, total_pieces=2000),
+    "wide": Preset(sizes=8, lengths_per_size=25, total_pieces=2400),
 }
 
 

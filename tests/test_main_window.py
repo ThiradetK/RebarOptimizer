@@ -482,3 +482,68 @@ def test_pdf_cutting_sheet_is_saved_in_the_background(
     assert out.read_bytes().startswith(b"%PDF")
     assert window.status_label.text() == GUI_TEXT["status_saved"]
     assert window.collect_user_settings().pdf_paper == "A3"
+
+
+def size_status(window: MainWindow) -> list[list[str]]:
+    table = window.size_status_table
+    return [
+        [table.item(row, column).text() for column in range(table.columnCount())]
+        for row in range(table.rowCount())
+    ]
+
+
+def test_eco_is_the_default_and_plans_one_size_at_a_time(
+    qtbot: QtBot, window: MainWindow, tmp_path: Path
+) -> None:
+    assert window.mode_combo.currentData() == "eco"
+    assert window.current_settings().size_workers == 1
+    assert not window.size_status_table.isVisible()
+    window.choose_input(write_template(tmp_path / "t.xlsx"))
+    compute(qtbot, window)
+    rows = size_status(window)
+    assert [row[0] for row in rows] == ["DB12", "DB16", "RB9"]
+    assert all(row[1] == GUI_TEXT["size_done"] and row[2] == "1" for row in rows)
+    assert all(row[3].endswith("วิ") for row in rows)
+    assert window.size_status_table.isVisible()
+
+
+def test_parallel_mode_shows_each_size_and_gives_the_same_totals(
+    qtbot: QtBot, window: MainWindow, tmp_path: Path
+) -> None:
+    window.choose_input(write_template(tmp_path / "t.xlsx"))
+    compute(qtbot, window)
+    sequential = window.metric_values["total_stock"].text()
+
+    window.mode_combo.setCurrentIndex(window.mode_combo.findData("balanced"))
+    window.workers_spin.setValue(2)
+    assert "2 Size" in window.resources_hint.text()
+    assert window.current_settings().size_workers == 2
+    compute(qtbot, window)
+    assert window.status_label.text() == GUI_TEXT["status_done"]
+    assert window.metric_values["total_stock"].text() == sequential
+    rows = size_status(window)
+    assert all(row[1] == GUI_TEXT["size_done"] for row in rows)
+    assert {row[2] for row in rows} == {"1", "2"}
+    assert window.progress_bar.value() == window.progress_bar.maximum()
+
+    saved = window.collect_user_settings()
+    assert (saved.performance_mode, saved.size_workers) == ("balanced", 2)
+
+
+def test_cancel_in_parallel_mode_marks_the_sizes(
+    qtbot: QtBot, window: MainWindow, tmp_path: Path
+) -> None:
+    path = tmp_path / "large.xlsx"
+    write_xlsx(make_pieces(PRESETS["wide"]), path)
+    window.choose_input(path)
+    window.workers_spin.setValue(2)
+    window.compute_button.click()
+    qtbot.waitUntil(
+        lambda: any(row[2] for row in size_status(window)), timeout=30_000
+    )  # a size has started
+    window.cancel_button.click()
+    qtbot.waitUntil(lambda: not window.is_running(), timeout=30_000)
+    assert window.status_label.text() == GUI_TEXT["status_cancelled"]
+    states = {row[1] for row in size_status(window)}
+    assert GUI_TEXT["size_cancelled"] in states
+    assert GUI_TEXT["size_queued"] not in states

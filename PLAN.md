@@ -142,10 +142,16 @@
 
 - รายงาน **lower bound** และ **gap %** = `(ผล − bound) / ผล` ทุก Size (bound จาก CP-SAT หรือจาก LP ของ column generation)
 
-### D9. คำนวณทีละ Size ไม่ใช้ multiprocessing
-- รัน Size ตามลำดับ ให้ CP-SAT ใช้หลาย thread เอง (`num_workers = min(8, cpu_count)`)
-- เหตุผล: ไม่แย่งคอร์กัน, ปุ่มยกเลิกและ progress ทำได้ตรงไปตรงมา, ไม่มีปัญหา spawn ใน PyInstaller
-- ยกเลิกผ่าน `CancelToken` (ห่อ `threading.Event`) ที่ส่งเข้า `planner.plan()` ระหว่าง CP-SAT ทำงานให้ thread เฝ้า token แล้วเรียก stop search ของ solver (ตรวจชื่อ API ตามเวอร์ชัน ortools ที่ pin) ยกเลิกแล้ว raise `Cancelled` ไม่เขียนไฟล์
+### D9. คำนวณทีละ Size เป็นค่าเริ่มต้น และเลือกคำนวณหลาย Size พร้อมกันได้
+- **ค่าเริ่มต้น (โหมด Eco):** รัน Size ตามลำดับใน process เดียว ให้ CP-SAT ใช้หลาย thread เอง (`num_workers = min(8, cpu_count)`)
+- **แก้ไข 2026-11-16 (ผู้ใช้อนุมัติ):** เพิ่มโหมด Balanced / Performance ที่คำนวณหลาย Size พร้อมกัน แต่ละ Size อยู่ใน worker process ของตัวเอง (`services/parallel.py`) และรัน `plan_size` เดิมทุกบรรทัด
+  - Size ไม่มีอะไรใช้ร่วมกัน: ชิ้นงานและเหล็กคงคลังถูกแบ่งตาม Size ก่อนคำนวณ ผลถูกรวมตามลำดับ Size เดิมแล้วผ่าน `verify_plan` เหมือนเดิม
+  - **ไม่ลด thread ของ CP-SAT ต่อ Size** เพราะวัดแล้วถ้าเหลือ 4 thread ชุด medium ช้าลงจาก 6 วินาที (OPTIMAL ทุก Size) เป็น 58 วินาทีและบาง Size ไม่ได้ OPTIMAL โหมดจึงเลือกแค่จำนวน Size ที่ทำพร้อมกัน: Eco 1, Balanced สูงสุด 2, Performance สูงสุด 4 และไม่เกิน 1 Size ต่อ 4 logical CPU (ผู้ใช้กำหนดเองได้)
+  - Size ที่ได้ OPTIMAL ให้ยอดเท่ากับการคำนวณทีละ Size เสมอ ส่วน Size ที่ชนเวลาจำกัดอาจได้ยอดต่างกัน (วัดได้ราว ±1.5% ต่อ Size) เพราะแบ่ง CPU กัน ผู้ใช้เลือกแบบเวลาจำกัดต่อ Size เท่าเดิม
+  - Size ที่ error, process ตาย หรือค้างเกิน `time_limit × 4 + 120 s` ถูกรายงานแยกตาม Size และ Size อื่นทำต่อจนจบ แต่ไม่ออกแผน (D7: ห้ามชิ้นงานหายเงียบ)
+  - worker ทำงานที่ priority ต่ำกว่าปกติ และปิดตัวเองเมื่อ process หลักหายไป
+  - ใน exe (PyInstaller) worker คือ exe ตัวเดิมที่ถูกเปิดซ้ำ จึงต้องเรียก `multiprocessing.freeze_support()` ที่ `entry.main`
+- ยกเลิกผ่าน `CancelToken` (ห่อ `threading.Event` หรือ `multiprocessing.Event` ใน worker) ที่ส่งเข้า `planner.plan()` ระหว่าง CP-SAT ทำงานให้ thread เฝ้า token แล้วเรียก stop search ของ solver ยกเลิกแล้ว raise `Cancelled` ไม่เขียนไฟล์ ในโหมดหลาย Size worker ที่ไม่หยุดใน 5 วินาทีถูก terminate และ Size ในคิวไม่ถูกเริ่ม
 
 ### D10. Core ไม่รู้จักภาษาและ UI
 - error/warning ใน core เก็บเป็น **รหัส + พารามิเตอร์** (เช่น `DUP_NO_DIFF_SIZE`, rows=[3, 9]) แปลงเป็นข้อความไทยที่ `i18n/th.py` ที่เดียว ใช้ร่วมกันทั้ง CLI, GUI และ writer

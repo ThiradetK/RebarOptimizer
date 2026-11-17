@@ -7,8 +7,10 @@ Saving never recomputes, so a locked output file can simply be saved again.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -70,6 +72,7 @@ from rebar_optimizer.domain.errors import (
     InputValidationError,
     Issue,
     OutputWriteError,
+    PlanningFailed,
     SettingsError,
 )
 from rebar_optimizer.domain.models import CuttingPlan, Piece
@@ -77,8 +80,11 @@ from rebar_optimizer.domain.settings import (
     KERF_MAX_MM,
     KERF_MIN_MM,
     OptimizerSettings,
+    PerformanceMode,
+    Resources,
     StockMode,
     parse_stock_lengths_m,
+    plan_resources,
 )
 from rebar_optimizer.i18n import th
 from rebar_optimizer.i18n.th import GUI_TEXT, format_metres
@@ -86,7 +92,7 @@ from rebar_optimizer.io.reader import SUPPORTED_SUFFIXES, ReadResult
 from rebar_optimizer.io.template import write_template
 from rebar_optimizer.io.writer import WriteSource
 from rebar_optimizer.services import planner
-from rebar_optimizer.services.cancel import ProgressEvent, ProgressKind
+from rebar_optimizer.services.cancel import ProgressEvent, ProgressKind, Stage
 from rebar_optimizer.services.summary import bar_counts, plan_totals, summarize_size
 from rebar_optimizer.ui import animations, user_settings
 from rebar_optimizer.ui.pdf_export import write_pdf
@@ -126,6 +132,20 @@ def check_stock_text(text: str) -> tuple[tuple[int, ...] | None, list[str]]:
 MAX_VISIBLE_SIZE_ROWS = 8
 MAX_VISIBLE_COUNT_ROWS = 8
 MAX_VISIBLE_WARNING_ROWS = 4
+
+
+SIZE_STATUS_ROWS = 6
+"""Rows of the per-size status table shown without scrolling."""
+
+
+@dataclass
+class _SizeStatus:
+    """One row of the per-size status table."""
+
+    state: str = "queued"
+    """``queued`` / ``running`` / ``done`` / ``failed`` / ``cancelled``."""
+    started: float = 0.0
+    seconds: float = 0.0
 
 
 def fit_table_height(table: QTableWidget, max_rows: int) -> None:
@@ -359,9 +379,30 @@ class MainWindow(QMainWindow):
         self.time_limit_spin.setDecimals(0)
         self.time_limit_spin.setSuffix(GUI_TEXT["time_limit_suffix"])
         advanced_layout.addWidget(self.time_limit_spin, 0, 1)
+        advanced_layout.addWidget(QLabel(GUI_TEXT["mode_label"]), 1, 0)
+        self.mode_combo = QComboBox()
+        for mode in PerformanceMode:
+            self.mode_combo.addItem(th.MODE_LABELS[mode], mode.value)
+        # The labels are long: let the box shrink instead of widening the whole panel.
+        self.mode_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.mode_combo.setMinimumContentsLength(10)
+        self.mode_combo.currentIndexChanged.connect(self._update_resources_hint)
+        advanced_layout.addWidget(self.mode_combo, 1, 1)
+        advanced_layout.addWidget(QLabel(GUI_TEXT["workers_label"]), 2, 0)
+        self.workers_spin = QSpinBox()
+        self.workers_spin.setRange(0, os.cpu_count() or 1)
+        self.workers_spin.setSpecialValueText(GUI_TEXT["workers_auto"])  # shown for 0
+        self.workers_spin.valueChanged.connect(self._update_resources_hint)
+        advanced_layout.addWidget(self.workers_spin, 2, 1)
+        self.resources_hint = QLabel()
+        self.resources_hint.setObjectName("muted")
+        self.resources_hint.setWordWrap(True)
+        advanced_layout.addWidget(self.resources_hint, 3, 0, 1, 2)
         self.animations_check = QCheckBox(GUI_TEXT["animations"])
         self.animations_check.toggled.connect(animations.set_user_enabled)
-        advanced_layout.addWidget(self.animations_check, 1, 0, 1, 2)
+        advanced_layout.addWidget(self.animations_check, 4, 0, 1, 2)
         self.advanced_section = CollapsibleSection(GUI_TEXT["advanced"], self.advanced_box)
         layout.addWidget(self.advanced_section)
 
@@ -386,6 +427,17 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel(GUI_TEXT["status_ready"])
         self.status_label.setObjectName("muted")
         layout.addWidget(self.status_label)
+        self._size_status: list[_SizeStatus] = []
+        self.size_status_table = QTableWidget(0, len(th.GUI_SIZE_STATUS_HEADERS))
+        self.size_status_table.setHorizontalHeaderLabels(list(th.GUI_SIZE_STATUS_HEADERS))
+        self.size_status_table.verticalHeader().setVisible(False)
+        self.size_status_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.size_status_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        header = self.size_status_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.size_status_table.setVisible(False)
+        layout.addWidget(self.size_status_table)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
@@ -544,6 +596,9 @@ class MainWindow(QMainWindow):
         self.animations_check.setChecked(u.animations)
         animations.set_user_enabled(u.animations)
         self.paper_combo.setCurrentText(u.pdf_paper)
+        self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(u.performance_mode)))
+        self.workers_spin.setValue(u.size_workers)
+        self._update_resources_hint()
         self.advanced_section.set_expanded(u.advanced_open, animate=False)
         if u.window_geometry:
             self.restoreGeometry(QByteArray.fromBase64(u.window_geometry.encode("ascii")))
@@ -561,6 +616,8 @@ class MainWindow(QMainWindow):
         u.time_limit_s = self.time_limit_spin.value()
         u.animations = self.animations_check.isChecked()
         u.pdf_paper = self.paper_combo.currentText()
+        u.performance_mode = self.mode_combo.currentData()
+        u.size_workers = self.workers_spin.value()
         u.advanced_open = self.advanced_section.is_expanded()
         u.window_geometry = bytes(self.saveGeometry().toBase64().data()).decode("ascii")
         u.splitter_state = bytes(self.splitter.saveState().toBase64().data()).decode("ascii")
@@ -626,12 +683,25 @@ class MainWindow(QMainWindow):
 
     def current_settings(self) -> OptimizerSettings:
         lengths = parse_stock_lengths_m(self.stock_edit.text())
+        resources = self._resources()
         return OptimizerSettings(
             stock_lengths_mm=lengths,
             stock_mode=StockMode.SINGLE if self.single_radio.isChecked() else StockMode.MIXED,
             kerf_mm=self.kerf_spin.value() if self.kerf_check.isChecked() else 0,
             time_limit_s=self.time_limit_spin.value(),
+            size_workers=resources.size_workers,
+            num_workers=resources.num_workers,
         )
+
+    def _resources(self) -> Resources:
+        """The mode decides how many sizes run side by side unless a count is typed."""
+        mode = PerformanceMode(self.mode_combo.currentData())
+        return plan_resources(mode, size_workers=self.workers_spin.value() or None)
+
+    def _update_resources_hint(self) -> None:
+        workers = self._resources().size_workers
+        key = "resources_many" if workers > 1 else "resources_one"
+        self.resources_hint.setText(GUI_TEXT[key].format(workers=workers, cpus=os.cpu_count() or 1))
 
     def clear_results(self) -> None:
         """Forget the shown result so it can never be saved for another input."""
@@ -746,6 +816,7 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._focus_stock_field)
                 return
             self._log(GUI_TEXT["log_oversize_continue"])
+        self._reset_size_status(list(dict.fromkeys(p.size for p in source.pieces)))
         worker = PlanWorker(Path(self.input_edit.text().strip()), settings, source=source)
         worker.progress.connect(self._on_progress)
         worker.succeeded.connect(self._on_succeeded)
@@ -809,18 +880,90 @@ class MainWindow(QMainWindow):
     def _on_progress(self, event: ProgressEvent) -> None:
         animations.animate_progress(self.progress_bar, round(event.fraction * PROGRESS_MAX))
         params = {"size": event.size, "index": event.index + 1, "total": event.total}
+        status = ""
         if event.kind is ProgressKind.SIZE_STARTED:
-            self._set_running_status(GUI_TEXT["status_size"].format(**params))
+            status = GUI_TEXT["status_size"].format(**params)
             self._log(GUI_TEXT["log_size_started"].format(**params))
         elif event.kind is ProgressKind.STAGE and event.stage is not None:
             stage = th.STAGE_LABELS[event.stage]
             step = th.stage_step_text(event.step, event.steps)
-            self._set_running_status(
-                GUI_TEXT["status_stage"].format(stage=stage, step=step, **params)
-            )
+            status = GUI_TEXT["status_stage"].format(stage=stage, step=step, **params)
             self._log(GUI_TEXT["log_stage"].format(size=event.size, stage=stage, step=step))
+        elif event.kind is ProgressKind.SIZE_FAILED:
+            self._log(GUI_TEXT["log_size_failed"].format(size=event.size, reason=event.message))
         else:
             self._log(GUI_TEXT["log_size_finished"].format(**params))
+        self._update_size_status(event)
+        if event.overall is not None:
+            # Sizes overlap: one size's stage would flicker, so show the counts
+            # (the table has each size's own stage and time).
+            states = [row.state for row in self._size_status]
+            text = GUI_TEXT["status_parallel"].format(
+                done=states.count("done") + states.count("failed"),
+                total=len(states),
+                running=states.count("running"),
+                queued=states.count("queued"),
+            )
+            if text != self._status_base:
+                self._status_base = text
+                self.status_label.setText(text)
+        elif status:
+            self._set_running_status(status)
+
+    # --- per-size status table -----------------------------------------------------------
+
+    def _reset_size_status(self, sizes: Sequence[str]) -> None:
+        """One queued row per size; shown from the start of planning."""
+        table = self.size_status_table
+        self._size_status = [_SizeStatus() for _ in sizes]
+        table.setRowCount(len(sizes))
+        for row, size in enumerate(sizes):
+            for column, text in enumerate((size, GUI_TEXT["size_queued"], "", "")):
+                table.setItem(row, column, QTableWidgetItem(text))
+        fit_table_height(table, SIZE_STATUS_ROWS)
+        table.setVisible(bool(sizes))
+
+    def _status_item(self, row: int, column: int) -> QTableWidgetItem:
+        item = self.size_status_table.item(row, column)
+        assert item is not None  # every cell is filled by _reset_size_status
+        return item
+
+    def _update_size_status(self, event: ProgressEvent) -> None:
+        if event.index >= len(self._size_status):
+            return
+        row = self._size_status[event.index]
+        now = time.monotonic()
+        if event.kind is ProgressKind.SIZE_STARTED:
+            row.state, row.started = "running", now
+            text = th.STAGE_LABELS[Stage.GREEDY]
+            self._status_item(event.index, 2).setText(str(event.worker + 1))
+        elif event.kind is ProgressKind.STAGE and event.stage is not None:
+            text = th.STAGE_LABELS[event.stage] + th.stage_step_text(event.step, event.steps)
+        elif event.kind is ProgressKind.SIZE_FAILED:
+            row.state, text = "failed", GUI_TEXT["size_failed"]
+            self._status_item(event.index, 1).setToolTip(event.message)
+        else:
+            row.state, text = "done", GUI_TEXT["size_done"]
+        row.seconds = now - row.started
+        self._status_item(event.index, 1).setText(text)
+        self._show_size_seconds(event.index)
+
+    def _show_size_seconds(self, index: int) -> None:
+        seconds = round(self._size_status[index].seconds)
+        self._status_item(index, 3).setText(GUI_TEXT["size_seconds"].format(seconds=seconds))
+
+    def _tick_size_status(self) -> None:
+        now = time.monotonic()
+        for index, row in enumerate(self._size_status):
+            if row.state == "running":
+                row.seconds = now - row.started
+                self._show_size_seconds(index)
+
+    def _mark_sizes_cancelled(self) -> None:
+        for index, row in enumerate(self._size_status):
+            if row.state in {"queued", "running"}:
+                row.state = "cancelled"
+                self._status_item(index, 1).setText(GUI_TEXT["size_cancelled"])
 
     def _set_running_status(self, text: str) -> None:
         """Show ``text``; the tick timer appends the seconds spent on it."""
@@ -836,6 +979,7 @@ class MainWindow(QMainWindow):
     def _tick_status(self) -> None:
         if not self.is_busy() or not self._status_base:
             return
+        self._tick_size_status()
         seconds = int(time.monotonic() - self._status_since)
         if seconds >= STATUS_ELAPSED_AFTER_S:
             self.status_label.setText(
@@ -851,18 +995,20 @@ class MainWindow(QMainWindow):
         animations.set_text_faded(self.status_label, GUI_TEXT["status_done"])
         self._show_results(outcome)
 
-    def _on_input_invalid(self, exc: InputValidationError | SettingsError) -> None:
+    def _on_input_invalid(self, exc: InputValidationError | SettingsError | PlanningFailed) -> None:
         self._stop_status_ticks()
         self.status_label.setText(GUI_TEXT["status_failed"])
-        header = (
-            GUI_TEXT["error_input_header"]
-            if isinstance(exc, InputValidationError)
-            else GUI_TEXT["error_settings_header"]
-        )
-        self._show_issues(header, exc.issues)
+        if isinstance(exc, PlanningFailed):
+            key = "error_sizes_header"
+        elif isinstance(exc, InputValidationError):
+            key = "error_input_header"
+        else:
+            key = "error_settings_header"
+        self._show_issues(GUI_TEXT[key], exc.issues)
 
     def _on_cancelled(self) -> None:
         self._stop_status_ticks()
+        self._mark_sizes_cancelled()
         animations.animate_progress(self.progress_bar, 0)
         animations.set_text_faded(self.status_label, GUI_TEXT["status_cancelled"])
 

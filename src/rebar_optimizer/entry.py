@@ -7,6 +7,7 @@ the log and returns the exit code (used by CI on the built exe).
 
 from __future__ import annotations
 
+import multiprocessing
 import os
 import sys
 import time
@@ -25,6 +26,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     started = time.perf_counter()
     args = list(sys.argv[1:] if argv is None else argv)
     _ensure_streams()
+    # In the packaged exe a size worker (services.parallel) is this same program
+    # started again: this call runs the worker and exits before any GUI exists.
+    multiprocessing.freeze_support()
     if "--selftest" in args:
         from rebar_optimizer.cli import main as cli_main  # noqa: PLC0415 - keep Qt out
 

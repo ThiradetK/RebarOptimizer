@@ -12,7 +12,12 @@ import os
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
-from rebar_optimizer.domain.settings import KERF_MAX_MM, KERF_MIN_MM, StockMode
+from rebar_optimizer.domain.settings import (
+    KERF_MAX_MM,
+    KERF_MIN_MM,
+    PerformanceMode,
+    StockMode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +43,9 @@ class UserSettings:
     theme: str = THEME_SYSTEM
     """``"system"`` follows Windows; ``"light"`` / ``"dark"`` once the user toggles."""
     pdf_paper: str = PDF_PAPERS[0]
+    performance_mode: str = PerformanceMode.ECO.value
+    size_workers: int = 0
+    """Sizes planned at the same time; 0 lets the mode decide."""
     advanced_open: bool = False
     window_geometry: str = ""
     """Base64 of ``QWidget.saveGeometry()``."""
@@ -79,6 +87,7 @@ _CHOICES: dict[str, tuple[str, ...]] = {
     "stock_mode": tuple(m.value for m in StockMode),
     "theme": THEME_CHOICES,
     "pdf_paper": PDF_PAPERS,
+    "performance_mode": tuple(m.value for m in PerformanceMode),
 }
 """String settings restricted to a fixed set of values."""
 
@@ -90,6 +99,8 @@ def _valid(name: str, value: object, default: object) -> bool:
         ok = isinstance(value, int) and not isinstance(value, bool)
         if ok and name == "kerf_mm":
             return KERF_MIN_MM <= value <= KERF_MAX_MM  # type: ignore[operator]
+        if ok and name == "size_workers":
+            return value >= 0  # type: ignore[operator]
         return ok
     if isinstance(default, float):
         return isinstance(value, int | float) and not isinstance(value, bool) and value > 0

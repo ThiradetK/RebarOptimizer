@@ -51,12 +51,15 @@ class IssueCode(StrEnum):
     TIME_LIMIT_NOT_POSITIVE = "TIME_LIMIT_NOT_POSITIVE"
     MAX_PATTERNS_NOT_POSITIVE = "MAX_PATTERNS_NOT_POSITIVE"
     NUM_WORKERS_NOT_POSITIVE = "NUM_WORKERS_NOT_POSITIVE"
+    SIZE_WORKERS_NOT_POSITIVE = "SIZE_WORKERS_NOT_POSITIVE"
     # --- planning ---
     PIECES_UNPLACED = "PIECES_UNPLACED"
     UNPLACED_TOO_LONG = "UNPLACED_TOO_LONG"
     WEIGHT_UNKNOWN = "WEIGHT_UNKNOWN"
     PATTERN_LIMIT_EXCEEDED = "PATTERN_LIMIT_EXCEEDED"
     TIME_LIMIT_HIT = "TIME_LIMIT_HIT"
+    SIZE_FAILED = "SIZE_FAILED"
+    """A size could not be planned (parallel mode reports each one)."""
     # --- output ---
     OUTPUT_LOCKED = "OUTPUT_LOCKED"
     OUTPUT_FAILED = "OUTPUT_FAILED"
@@ -109,6 +112,11 @@ class SettingsError(_IssuesError):
 
 class OutputWriteError(_IssuesError):
     """The output workbook could not be written."""
+
+
+class PlanningFailed(_IssuesError):
+    """One or more sizes failed while the others were planned; ``issues``
+    holds one ``SIZE_FAILED`` per failed size. No plan is produced (D7)."""
 
 
 class InvariantViolation(RebarOptimizerError):
