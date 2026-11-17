@@ -94,6 +94,24 @@ def plan(
     sizes = list(dict.fromkeys(p.size for p in pieces))
     size_plans: list[SizePlan] = []
     issues: list[Issue] = []
+    if min(settings.size_workers, len(sizes)) > 1:
+        # Sizes share nothing (pieces and inventory are split per size), so they
+        # can be planned side by side; each one runs the same ``plan_size``.
+        from rebar_optimizer.services import parallel  # noqa: PLC0415 - only when used
+
+        tasks = [
+            parallel.SizeTask(
+                index,
+                size,
+                tuple(p for p in pieces if p.size == size),
+                inventory_by_size.get(size, NO_INVENTORY),
+            )
+            for index, size in enumerate(sizes)
+        ]
+        for size_plan, size_issues in parallel.run_sizes(tasks, settings, on_progress, cancel):
+            size_plans.append(size_plan)
+            issues += size_issues
+        sizes = []
     for index, size in enumerate(sizes):
         check_cancelled(cancel)
         if on_progress is not None:

@@ -82,3 +82,17 @@ def test_app_icon_resource_is_packaged() -> None:
     assert "rebar_optimizer/ui/resources" in spec
     assert "console=False" in spec
     assert "exclude_binaries=True" in spec  # onedir (LGPL: Qt DLLs replaceable)
+
+
+def test_size_workers_never_import_qt() -> None:
+    """A worker process imports ``services.parallel``; Qt there would cost start-up
+    time and memory in every worker."""
+    code = (
+        "import sys\n"
+        "import rebar_optimizer.services.parallel\n"
+        "sys.exit(99 if 'PySide6' in sys.modules else 0)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr

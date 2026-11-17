@@ -85,3 +85,13 @@ def test_unknown_theme_falls_back_to_system(tmp_path: Path) -> None:
     assert user_settings.load(path).theme == "system"
     path.write_text('{"theme": "dark"}', encoding="utf-8")
     assert user_settings.load(path).theme == "dark"
+
+
+def test_invalid_performance_settings_fall_back(tmp_path: Path) -> None:
+    path = tmp_path / "s.json"
+    path.write_text('{"performance_mode": "turbo", "size_workers": -3}', encoding="utf-8")
+    loaded = user_settings.load(path)
+    assert (loaded.performance_mode, loaded.size_workers) == ("eco", 0)
+    path.write_text('{"performance_mode": "performance", "size_workers": 4}', encoding="utf-8")
+    loaded = user_settings.load(path)
+    assert (loaded.performance_mode, loaded.size_workers) == ("performance", 4)

@@ -10,6 +10,7 @@ import argparse
 import logging
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import NoReturn
 
@@ -20,10 +21,17 @@ from rebar_optimizer.domain.errors import (
     Issue,
     IssueCode,
     OutputWriteError,
+    PlanningFailed,
     SettingsError,
 )
 from rebar_optimizer.domain.models import CuttingPlan, InventoryStock, Piece, StockSource
-from rebar_optimizer.domain.settings import OptimizerSettings, StockMode, parse_stock_lengths_m
+from rebar_optimizer.domain.settings import (
+    OptimizerSettings,
+    PerformanceMode,
+    StockMode,
+    parse_stock_lengths_m,
+    plan_resources,
+)
 from rebar_optimizer.i18n import th
 from rebar_optimizer.i18n.th import CLI_TEXT, format_metres
 from rebar_optimizer.io.reader import read_pieces
@@ -57,6 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kerf-mm", type=int, default=0, help=CLI_TEXT["help_kerf"])
     parser.add_argument("--single-length", action="store_true", help=CLI_TEXT["help_single"])
     parser.add_argument("--time-limit", type=float, default=30.0, help=CLI_TEXT["help_time_limit"])
+    parser.add_argument("--workers", type=int, metavar="N", help=CLI_TEXT["help_workers"])
+    parser.add_argument(
+        "--mode", choices=[m.value for m in PerformanceMode], help=CLI_TEXT["help_mode"]
+    )
     parser.add_argument(
         "--make-template", type=Path, metavar="PATH", help=CLI_TEXT["help_template"]
     )
@@ -75,7 +87,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (InputValidationError, SettingsError) as exc:
         _print_issues(CLI_TEXT["errors_header"], exc.issues)
         return EXIT_INPUT
-    except OutputWriteError as exc:
+    except (OutputWriteError, PlanningFailed) as exc:
         _print_issues(CLI_TEXT["errors_header"], exc.issues)
         return EXIT_ERROR
     except Cancelled:
@@ -103,6 +115,7 @@ def _run(args: argparse.Namespace, log_path: Path) -> int:
         stock_mode=StockMode.SINGLE if args.single_length else StockMode.MIXED,
         kerf_mm=args.kerf_mm,
         time_limit_s=args.time_limit,
+        **_resource_settings(args),
     )
     settings.validate()
     result = read_pieces(args.input)
@@ -126,6 +139,17 @@ def _run(args: argparse.Namespace, log_path: Path) -> int:
         written = write_plan(args.output, cutting_plan, source)
         print(CLI_TEXT["output_written"].format(path=written))
     return EXIT_UNPLACED if cutting_plan.unplaced else EXIT_OK
+
+
+def _resource_settings(args: argparse.Namespace) -> dict[str, int]:
+    """Without ``--workers`` / ``--mode``: one size at a time, as before."""
+    if args.workers is None and args.mode is None:
+        return {}
+    if args.workers is not None and args.workers <= 0:
+        return {"size_workers": args.workers}  # reported by ``validate``
+    mode = PerformanceMode(args.mode) if args.mode else PerformanceMode.BALANCED
+    resources = plan_resources(mode, size_workers=args.workers)
+    return {"size_workers": resources.size_workers, "num_workers": resources.num_workers}
 
 
 def format_plan(plan: CuttingPlan) -> list[str]:
@@ -239,10 +263,19 @@ def _print_progress(event: ProgressEvent) -> None:
             file=sys.stderr,
         )
     elif event.kind is ProgressKind.STAGE and event.stage is not None:
+        # Sizes planned side by side interleave their lines: say whose stage it is.
+        key = "progress_stage_of" if event.overall is not None else "progress_stage"
         print(
-            CLI_TEXT["progress_stage"].format(
-                stage=th.STAGE_LABELS[event.stage], step=th.stage_step_text(event.step, event.steps)
+            CLI_TEXT[key].format(
+                size=event.size,
+                stage=th.STAGE_LABELS[event.stage],
+                step=th.stage_step_text(event.step, event.steps),
             ),
+            file=sys.stderr,
+        )
+    elif event.kind is ProgressKind.SIZE_FAILED:
+        print(
+            CLI_TEXT["progress_failed"].format(size=event.size, reason=event.message),
             file=sys.stderr,
         )
 
@@ -293,6 +326,14 @@ def run_selftest(log_path: Path) -> int:
                 stocked = planner.plan(SELFTEST_PIECES, settings, inventory=SELFTEST_INVENTORY)
                 if stocked.sizes[1].inventory_stock_mm == 0:
                     raise AssertionError("the 7 m inventory bars of DB16 must be used")
+        # Sizes side by side: in the packaged exe this starts the exe again as workers.
+        settings = OptimizerSettings(stock_lengths_mm=(10000, 12000))
+        one_by_one = planner.plan(SELFTEST_PIECES, settings)
+        together = planner.plan(SELFTEST_PIECES, replace(settings, size_workers=2))
+        if [s.total_stock_mm for s in together.sizes] != [
+            s.total_stock_mm for s in one_by_one.sizes
+        ]:
+            raise AssertionError("planning sizes side by side must buy the same stock")
     except Exception:
         logger.exception("selftest failed")
         print(CLI_TEXT["selftest_failed"].format(log_path=log_path), file=sys.stderr)

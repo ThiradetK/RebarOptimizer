@@ -104,6 +104,8 @@ MESSAGES: dict[IssueCode, str] = {
     IssueCode.TIME_LIMIT_NOT_POSITIVE: "เวลาคำนวณสูงสุดต้องมากกว่า 0 วินาที (พบ {value})",
     IssueCode.MAX_PATTERNS_NOT_POSITIVE: "จำนวน pattern สูงสุดต้องมากกว่า 0 (พบ {value})",
     IssueCode.NUM_WORKERS_NOT_POSITIVE: "จำนวน thread ต้องมากกว่า 0 (พบ {value})",
+    IssueCode.SIZE_WORKERS_NOT_POSITIVE: "จำนวน worker ต้องมากกว่า 0 (พบ {value})",
+    IssueCode.SIZE_FAILED: "Size {size}: คำนวณไม่สำเร็จ ({reason})",
     # planning
     IssueCode.PIECES_UNPLACED: (
         "มีชิ้นงาน {count} ชิ้นที่วางไม่ได้ เพราะยาวกว่าเหล็กเส้นที่ยาวที่สุด (No {nos}) "
@@ -317,10 +319,14 @@ CLI_TEXT: dict[str, str] = {
     "help_time_limit": "เวลาคำนวณสูงสุดต่อ Size (วินาที)",
     "help_template": "สร้างไฟล์ input ตัวอย่างแล้วจบ",
     "help_selftest": "แก้โจทย์ตัวอย่างในตัวเพื่อตรวจว่าโปรแกรมทำงานได้",
+    "help_workers": "จำนวน Size ที่คำนวณพร้อมกัน (ไม่ระบุ = ทีละ Size)",
+    "help_mode": "ระดับการใช้ CPU: eco, balanced หรือ performance",
     "need_input": "กรุณาระบุไฟล์ input และ --stock",
     "template_written": "สร้างไฟล์ตัวอย่างแล้ว: {path}",
     "progress": "[{index}/{total}] กำลังคำนวณ Size {size} ...",
     "progress_stage": "      {stage}{step} ...",
+    "progress_stage_of": "      Size {size}: {stage}{step} ...",
+    "progress_failed": "      Size {size}: คำนวณไม่สำเร็จ ({reason})",
     "size_header": "Size {size} — สถานะ {status}",
     "single_stock": "  ความยาวเหล็กเส้นที่เลือก: {stock_m} ม.",
     "stock_count": "  สั่งซื้อ: {items}",
@@ -385,6 +391,22 @@ GUI_TEXT: dict[str, str] = {
     "time_limit_label": "เวลาคำนวณสูงสุดต่อ Size",
     "time_limit_suffix": " วินาที",
     "animations": "แสดง animation",
+    "mode_label": "โหมดการใช้เครื่อง",
+    "workers_label": "Size ที่คำนวณพร้อมกัน",
+    "workers_auto": "อัตโนมัติ",
+    "resources_one": "คำนวณทีละ Size · เครื่องนี้มี {cpus} CPU",
+    "resources_many": (
+        "คำนวณพร้อมกัน {workers} Size · เครื่องนี้มี {cpus} CPU\n"
+        "เร็วขึ้นเมื่อมีหลาย Size ที่ใช้เวลานาน แต่ใช้ RAM มากขึ้น "
+        "และ Size ที่ชนเวลาจำกัดอาจได้ยอดต่างจากการคำนวณทีละ Size เล็กน้อย"
+    ),
+    "size_queued": "รอคิว",
+    "size_done": "เสร็จ",
+    "size_failed": "ผิดพลาด",
+    "size_cancelled": "ยกเลิก",
+    "size_seconds": "{seconds} วิ",
+    "status_parallel": "เสร็จ {done}/{total} · กำลังคำนวณ {running} · รอคิว {queued}",
+    "log_size_failed": "Size {size} ผิดพลาด: {reason}",
     "theme_to_dark": "🌙 โหมดมืด",
     "theme_to_light": "☀ โหมดสว่าง",
     "theme_tooltip": "สลับธีมสว่าง/มืด (จำไว้ใช้ครั้งต่อไป)",
@@ -483,6 +505,9 @@ GUI_TEXT: dict[str, str] = {
     "error_title": "พบปัญหา",
     "error_input_header": "แก้ไขไฟล์ input ตามรายการนี้แล้วลองใหม่ (ข้อมูลที่กรอกไว้ยังอยู่ครบ):",
     "error_settings_header": "แก้ไขค่าที่กรอกตามรายการนี้แล้วลองใหม่:",
+    "error_sizes_header": (
+        "คำนวณไม่สำเร็จบาง Size จึงไม่มีผลลัพธ์ให้บันทึก (Size อื่นคำนวณจบแล้ว) รายละเอียดอยู่ในไฟล์ log:"
+    ),
     "error_output_header": "บันทึกไฟล์ไม่สำเร็จ ผลการคำนวณยังอยู่ กดบันทึกซ้ำได้:",
     "unexpected_title": "เกิดข้อผิดพลาด",
     "unexpected": (
@@ -504,6 +529,13 @@ GUI_TEXT: dict[str, str] = {
     "file_dropped": "เลือกไฟล์แล้ว: {name}",
     "drop_not_xlsx": "ลากได้เฉพาะไฟล์ Excel (.xlsx)",
 }
+
+MODE_LABELS: dict[str, str] = {
+    "eco": "Eco — ทีละ Size",
+    "balanced": "Balanced — สูงสุด 2 Size พร้อมกัน",
+    "performance": "Performance — สูงสุด 4 Size พร้อมกัน",
+}
+GUI_SIZE_STATUS_HEADERS: tuple[str, ...] = ("Size", "สถานะ", "Worker", "เวลา")
 
 GUI_SIZE_TABLE_HEADERS: tuple[str, ...] = (
     "Size",

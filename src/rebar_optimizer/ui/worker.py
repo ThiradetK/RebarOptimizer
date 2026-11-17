@@ -22,6 +22,7 @@ from rebar_optimizer.domain.errors import (
     Cancelled,
     InputValidationError,
     OutputWriteError,
+    PlanningFailed,
     SettingsError,
 )
 from rebar_optimizer.domain.models import CuttingPlan
@@ -50,7 +51,8 @@ class PlanWorker(QObject):
     succeeded = Signal(object)
     """``PlanOutcome``."""
     input_invalid = Signal(object)
-    """``InputValidationError | SettingsError``."""
+    """``InputValidationError | SettingsError | PlanningFailed``: nothing to show,
+    the issues say why."""
     cancelled = Signal()
     crashed = Signal(str)
     """Short English description; details are in the log."""
@@ -87,7 +89,7 @@ class PlanWorker(QObject):
             previews = tuple(prepare_preview(size_plan) for size_plan in plan.sizes)
             plan_totals(plan)  # fills the per-size summary cache used by the window
             self.succeeded.emit(PlanOutcome(plan=plan, source=source, previews=previews))
-        except (InputValidationError, SettingsError) as exc:
+        except (InputValidationError, SettingsError, PlanningFailed) as exc:
             self.input_invalid.emit(exc)
         except Cancelled:
             logger.info("computation cancelled")
