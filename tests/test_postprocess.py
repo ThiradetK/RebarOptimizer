@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from collections import Counter
 
 import pytest
@@ -7,6 +8,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from rebar_optimizer.domain.errors import Cancelled
+from rebar_optimizer.domain.models import StockSource
 from rebar_optimizer.services.cancel import CancelToken
 from rebar_optimizer.services.postprocess import (
     classify_remnant,
@@ -49,6 +51,67 @@ def test_overcut_bar_that_empties_is_dropped() -> None:
     plan = bars((12000, (6000, 6000)), (10000, (4000,)))
     result = remove_overcuts(plan, {6000: 2}, (10000, 12000), 0)
     assert result == bars((12000, (6000, 6000)))
+
+
+def reference_remove_overcuts(
+    plan: list[RawBar], demand: dict[int, int], stocks: tuple[int, ...], kerf_mm: int
+) -> list[RawBar]:
+    """The plain definition: score every bar for every surplus piece, first best wins."""
+    result: list[RawBar | None] = list(plan)
+    surplus = cut_counts(plan) - Counter(demand)
+    for length in sorted(surplus, reverse=True):
+        for _ in range(surplus[length]):
+            best: tuple[tuple[int, int, int], int] | None = None
+            for index, bar in enumerate(result):
+                if bar is None or length not in bar.lengths:
+                    continue
+                remaining = list(bar.lengths)
+                remaining.remove(length)
+                if not remaining:
+                    saving, slack = bar.stock_length_mm, 0
+                else:
+                    shorter = (
+                        None
+                        if bar.is_inventory
+                        else kerf.shortest_fitting_stock(remaining, stocks, kerf_mm)
+                    )
+                    saving = max(0, bar.stock_length_mm - (shorter or bar.stock_length_mm))
+                    slack = kerf.slack_mm(remaining, bar.stock_length_mm, kerf_mm)
+                score = (0, saving, slack) if bar.is_inventory else (saving, 0, slack)
+                if best is None or score > best[0]:
+                    best = (score, index)
+            assert best is not None
+            bar = result[best[1]]
+            assert bar is not None
+            remaining = list(bar.lengths)
+            remaining.remove(length)
+            result[best[1]] = (
+                RawBar.of(bar.stock_length_mm, remaining, bar.source) if remaining else None
+            )
+    return [bar for bar in result if bar is not None]
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_overcut_removal_matches_the_plain_definition(seed: int) -> None:
+    rng = random.Random(seed)
+    stocks = (6000, 10000, 12000)
+    lengths = [rng.randrange(500, 6001, 500) for _ in range(rng.randint(2, 6))]
+    kerf_mm = rng.choice((0, 3))
+    plan: list[RawBar] = []
+    for _ in range(rng.randint(1, 60)):  # few distinct contents, repeated as in ILP results
+        cuts: list[int] = []
+        while True:
+            length = rng.choice(lengths)
+            if not kerf.fits([*cuts, length], 12000, kerf_mm):
+                break
+            cuts.append(length)
+        source = StockSource.INVENTORY if rng.random() < 0.2 else StockSource.NEW
+        plan.extend([RawBar.of(12000, cuts, source)] * rng.randint(1, 4))
+    counts = cut_counts(plan)
+    demand = {length: rng.randint(0, n) for length, n in counts.items()}
+    assert remove_overcuts(plan, demand, stocks, kerf_mm) == reference_remove_overcuts(
+        plan, demand, stocks, kerf_mm
+    )
 
 
 # --- step 2: downsizing ----------------------------------------------------------

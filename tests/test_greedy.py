@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from collections import Counter
 
 import pytest
@@ -29,6 +30,40 @@ def test_best_fit_respects_kerf() -> None:
 def test_best_fit_rejects_too_long_piece() -> None:
     with pytest.raises(ValueError, match="longer than stock"):
         best_fit_decreasing([12001], 12000, 0)
+
+
+def reference_best_fit(
+    pieces_desc: list[int], stock_mm: int, kerf_mm: int, inventory_bars: tuple[int, ...]
+) -> tuple[list[list[int]], list[list[int]]]:
+    """The plain definition: scan every open bar, tightest fit, lowest index on ties."""
+    bins: list[list[int]] = [[] for _ in inventory_bars]
+    free = [kerf.capacity(length, kerf_mm) for length in inventory_bars]
+    for length in pieces_desc:
+        need = kerf.item_size(length, kerf_mm)
+        fitting = [(f, i) for i, f in enumerate(free) if f >= need]
+        if fitting:
+            _, index = min(fitting)
+        else:
+            index = len(bins)
+            bins.append([])
+            free.append(kerf.capacity(stock_mm, kerf_mm))
+        bins[index].append(length)
+        free[index] -= need
+    split = len(inventory_bars)
+    return bins[split:], bins[:split]
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_best_fit_matches_the_plain_definition(seed: int) -> None:
+    rng = random.Random(seed)
+    step = rng.choice((10, 50, 250, 1000))
+    demand = Counter(rng.randrange(300, 12001, step) for _ in range(rng.randint(1, 300)))
+    pieces = expand(demand)
+    kerf_mm = rng.choice((0, 3, 5))
+    inventory = tuple(rng.choice((6000, 9000, 12000)) for _ in range(rng.randint(0, 6)))
+    assert best_fit_decreasing(pieces, 12000, kerf_mm, inventory) == reference_best_fit(
+        pieces, 12000, kerf_mm, inventory
+    )
 
 
 def test_every_piece_is_placed_and_bars_fit() -> None:

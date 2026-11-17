@@ -54,8 +54,11 @@ CANCEL_GRACE_S = 5.0
 EXIT_GRACE_S = 2.0
 HANG_FACTOR = 4.0
 HANG_EXTRA_S = 120.0
-"""A size is given up after ``time_limit_s * HANG_FACTOR + HANG_EXTRA_S``: the
-time limit is a target, not a hard stop, so only far beyond it is a hang."""
+"""A size is given up when its worker sends nothing (no stage, no result) for
+``time_limit_s * HANG_FACTOR + HANG_EXTRA_S``. The time limit is a target, not a
+hard stop, so only far beyond it is a hang. Counting from the last message
+rather than from the start keeps a large size that is still moving through
+its stages from being given up."""
 
 
 @dataclass(frozen=True)
@@ -165,7 +168,7 @@ class _Worker:
         self.process.start()
         child.close()
         self.task: SizeTask | None = None
-        self.started = 0.0
+        self.last_heard = 0.0
 
     def stop(self, grace_s: float) -> None:
         """Ask an idle worker to leave; terminate whatever is left after ``grace_s``."""
@@ -233,7 +236,7 @@ class _Run:
     def _assign(self, worker: _Worker) -> None:
         task = self.pending.popleft()
         worker.task = task
-        worker.started = time.monotonic()
+        worker.last_heard = time.monotonic()
         self._emit(ProgressKind.SIZE_STARTED, task, worker)
         with contextlib.suppress(OSError, ValueError):  # worker gone: _check reports it
             worker.conn.send(task)
@@ -279,6 +282,7 @@ class _Run:
             except (EOFError, OSError):
                 broken = True
                 break
+            worker.last_heard = time.monotonic()
             self._handle(worker, message)
         if worker.task is None:
             return
@@ -287,8 +291,8 @@ class _Run:
             self._fail(
                 worker, f"worker process ended unexpectedly (exit code {worker.process.exitcode})"
             )
-        elif time.monotonic() - worker.started > self.hang_after_s:
-            self._fail(worker, f"no result after {self.hang_after_s:.0f} s")
+        elif time.monotonic() - worker.last_heard > self.hang_after_s:
+            self._fail(worker, f"no progress for {self.hang_after_s:.0f} s")
         else:
             return
         worker.stop(0.0)
