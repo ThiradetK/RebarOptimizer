@@ -21,6 +21,7 @@ from rebar_optimizer.services.cancel import (
     CancelToken,
     ProgressEvent,
     ProgressKind,
+    Stage,
     StageCallback,
 )
 from rebar_optimizer.services.parallel import SizeResult, SizeTask, solve_task
@@ -183,7 +184,7 @@ def ignore_cancel(
 
 @pytest.mark.parametrize(
     ("solve", "reason"),
-    [(fail_on_s1, "ValueError: boom"), (die_on_s1, "exit code 7"), (hang_on_s1, "no result after")],
+    [(fail_on_s1, "ValueError: boom"), (die_on_s1, "exit code 7"), (hang_on_s1, "no progress for")],
 )
 def test_a_failing_size_does_not_stop_the_others(
     solve: parallel.Solve, reason: str, monkeypatch: pytest.MonkeyPatch
@@ -202,6 +203,24 @@ def test_a_failing_size_does_not_stop_the_others(
     failed = [e for e in events if e.kind is ProgressKind.SIZE_FAILED]
     assert [e.size for e in failed] == ["S1"] and reason in failed[0].message
     assert events[-1].fraction == 1.0
+
+
+def slow_but_reporting(
+    task: SizeTask, settings: OptimizerSettings, cancel: CancelToken, on_stage: StageCallback
+) -> SizeResult:
+    for _ in range(9):  # 9 s in all, each gap well under the 3 s limit below
+        on_stage(Stage.GREEDY, 0, 1)
+        time.sleep(1.0)
+    return solve_task(task, settings, cancel, on_stage)
+
+
+def test_a_slow_size_that_keeps_reporting_is_not_a_hang(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(parallel, "HANG_FACTOR", 0.0)
+    monkeypatch.setattr(parallel, "HANG_EXTRA_S", 3.0)
+    results = parallel.run_sizes(
+        tasks_(2), settings_(size_workers=2), None, solve=slow_but_reporting
+    )
+    assert [plan.size for plan, _ in results] == ["S0", "S1"]
 
 
 @pytest.mark.parametrize("solve", [wait_for_cancel, ignore_cancel])

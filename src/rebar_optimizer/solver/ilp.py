@@ -129,7 +129,8 @@ def solve_patterns(
 
     bars: list[RawBar] = []
     for pattern, count in zip(patterns, values, strict=True):
-        bars.extend(pattern_set.to_raw_bar(pattern) for _ in range(count))
+        if count:  # one RawBar (immutable) per pattern: converting each bar took ~20 s at 440,000
+            bars.extend([pattern_set.to_raw_bar(pattern)] * count)
     return SolveResult(
         bars=tuple(bars),
         status=SolveStatus.OPTIMAL if proven else SolveStatus.FEASIBLE,

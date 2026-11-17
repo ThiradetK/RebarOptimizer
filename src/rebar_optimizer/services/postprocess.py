@@ -67,69 +67,83 @@ def remove_overcuts(
     """Drop surplus pieces (D5 step 1): prefer (a) the bar whose stock can then
     shrink the most (vanishing counts as shrinking to 0; purchased stock before
     inventory), else (b) the bar that ends up with the longest remnant, so
-    remnants concentrate in one bar.
+    remnants concentrate in one bar. Ties go to the earliest bar.
 
-    Bars are indexed by the lengths they hold: scanning every bar for every
-    surplus piece took seconds on 50,000-bar ILP results, without a cancel check.
+    Bars with the same content score the same, so holders of each length are
+    grouped by content and each content is scored once. ILP results repeat a
+    few thousand patterns over up to hundreds of thousands of bars; scoring
+    every bar for every surplus piece took about a minute at 440,000 bars.
     """
     result: list[RawBar | None] = list(bars)
     surplus = cut_counts(bars) - Counter(demand)
-    holders: dict[int, set[int]] = {length: set() for length in surplus}
+    # length -> content -> positions holding that content, ascending
+    holders: dict[int, dict[RawBar, list[int]]] = {length: {} for length in surplus}
+
+    def add(position: int, bar: RawBar) -> None:
+        for length in set(bar.lengths) & holders.keys():
+            bisect.insort(holders[length].setdefault(bar, []), position)
+
+    def drop(position: int, bar: RawBar) -> None:
+        for length in set(bar.lengths) & holders.keys():
+            group = holders[length][bar]
+            group.pop(bisect.bisect_left(group, position))
+            if not group:
+                del holders[length][bar]
+
     for position, original in enumerate(bars):
         for length in set(original.lengths) & holders.keys():
-            holders[length].add(position)
+            holders[length].setdefault(original, []).append(position)
+    scores: dict[tuple[RawBar, int], tuple[int, int, int]] = {}
     removed = 0
     for length in sorted(surplus, reverse=True):
         for _ in range(surplus[length]):
             removed += 1
             if removed % CANCEL_CHECK_EVERY == 0:
                 check_cancelled(cancel)
-            candidates = sorted(holders[length])
-            live = [bar_ for i in candidates if (bar_ := result[i]) is not None]
-            index = candidates[_bar_to_remove_from(live, length, stock_lengths_mm, kerf_mm)]
+            best: tuple[tuple[int, int, int], int] | None = None
+            for content, positions in holders[length].items():
+                key = (content, length)
+                score = scores.get(key)
+                if score is None:
+                    score = scores[key] = _removal_score(content, length, stock_lengths_mm, kerf_mm)
+                if best is None or (score, -positions[0]) > (best[0], -best[1]):
+                    best = (score, positions[0])
+            if best is None:  # pragma: no cover - surplus implies presence
+                raise AssertionError(f"no bar holds surplus length {length}")
+            index = best[1]
             bar = result[index]
             assert bar is not None
+            drop(index, bar)
             remaining = list(bar.lengths)
             remaining.remove(length)
-            if length not in remaining:
-                holders[length].discard(index)
             if remaining:
-                result[index] = RawBar.of(bar.stock_length_mm, remaining, bar.source)
+                smaller = RawBar.of(bar.stock_length_mm, remaining, bar.source)
+                result[index] = smaller
+                add(index, smaller)
             else:
                 result[index] = None
-                for other in holders.values():
-                    other.discard(index)
     return [bar for bar in result if bar is not None]
 
 
-def _bar_to_remove_from(
-    bars: Sequence[RawBar], length: int, stock_lengths_mm: Sequence[int], kerf_mm: int
-) -> int:
-    best_index = -1
-    best_score: tuple[int, int, int] = (-1, -1, -1)
-    for index, bar in enumerate(bars):
-        if length not in bar.lengths:
-            continue
-        remaining = list(bar.lengths)
-        remaining.remove(length)
-        if not remaining:
-            saving = bar.stock_length_mm
-            slack = 0
-        else:
-            # An inventory bar never shrinks here; ``assign_stock`` may swap it later.
-            shorter = (
-                None
-                if bar.is_inventory
-                else kerf.shortest_fitting_stock(remaining, stock_lengths_mm, kerf_mm)
-            )
-            saving = max(0, bar.stock_length_mm - (shorter or bar.stock_length_mm))
-            slack = kerf.slack_mm(remaining, bar.stock_length_mm, kerf_mm)
-        score = (0, saving, slack) if bar.is_inventory else (saving, 0, slack)
-        if score > best_score:
-            best_index, best_score = index, score
-    if best_index < 0:  # pragma: no cover - surplus implies presence
-        raise AssertionError(f"no bar holds surplus length {length}")
-    return best_index
+def _removal_score(
+    bar: RawBar, length: int, stock_lengths_mm: Sequence[int], kerf_mm: int
+) -> tuple[int, int, int]:
+    """Higher is better: (purchase saved, inventory saved, remnant left)."""
+    remaining = list(bar.lengths)
+    remaining.remove(length)
+    if not remaining:
+        saving = bar.stock_length_mm
+        slack = 0
+    else:
+        # An inventory bar never shrinks here; ``assign_stock`` may swap it later.
+        shorter = (
+            None
+            if bar.is_inventory
+            else kerf.shortest_fitting_stock(remaining, stock_lengths_mm, kerf_mm)
+        )
+        saving = max(0, bar.stock_length_mm - (shorter or bar.stock_length_mm))
+        slack = kerf.slack_mm(remaining, bar.stock_length_mm, kerf_mm)
+    return (0, saving, slack) if bar.is_inventory else (saving, 0, slack)
 
 
 # --- step 2 ----------------------------------------------------------------------
